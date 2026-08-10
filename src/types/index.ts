@@ -37,6 +37,26 @@ export interface ShowerInfo {
   isPeakingThisWeek: boolean;
 }
 
+/** A contiguous period of dark, moon-free sky during the night. */
+export interface ViewingWindow {
+  start: Date;
+  end: Date;
+}
+
+export interface MoonInfo {
+  /** Fraction of the moon illuminated, 0 (new) to 1 (full). */
+  illumination: number;
+  phaseName: string;
+  moonrise: Date | null;
+  moonset: Date | null;
+  /** Longest moon-free window tonight; null means the moon is up all night. */
+  bestViewingWindow: ViewingWindow | null;
+  /** True when the moon is below the horizon for essentially the whole night. */
+  moonDownAllNight: boolean;
+  /** Total hours the moon is below the horizon tonight. */
+  darkHours: number;
+}
+
 export interface SkyBriefError {
   section: "iss" | "aurora" | "showers";
   message: string;
@@ -48,6 +68,7 @@ export interface SkyBrief {
   issPasses: IssPass[];
   aurora: AuroraInfo | null;
   showers: ShowerInfo[];
+  moon: MoonInfo;
   errors: SkyBriefError[];
 }
 

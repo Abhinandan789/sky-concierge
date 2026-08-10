@@ -2,12 +2,14 @@ import type {
   AuroraInfo,
   IssPass,
   LatLon,
+  MoonInfo,
   ShowerInfo,
   SkyBrief,
   SkyBriefError,
 } from "@/types";
 import { computeTonightAurora, fetchKpForecast } from "./aurora";
 import { findSatellitePasses } from "./iss-passes";
+import { computeMoonInfo } from "./moon";
 import { computeShowerStatus } from "./showers";
 import { fetchTleSet } from "./tle";
 
@@ -86,12 +88,16 @@ export async function buildTonightBrief(
     errors.push({ section: "showers", message: errorMessage(error) });
   }
 
+  // --- Moon & viewing window ---
+  const moon: MoonInfo = computeMoonInfo(location, now);
+
   return {
     location,
     generatedAt: now,
     issPasses,
     aurora,
     showers,
+    moon,
     errors,
   };
 }

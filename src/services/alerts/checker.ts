@@ -1,12 +1,25 @@
-import { getDb, insertAlertLogIfNotExists, listEnabledSubscriptions } from "@/lib/db";
+import type { DatabaseSync } from "node:sqlite";
+import {
+  getDb,
+  insertAlertLogIfNotExists,
+  listEnabledSubscriptions,
+} from "@/lib/db";
 import { formatCompass, formatTime } from "@/lib/utils";
 import { buildTonightBrief } from "@/services/sky/brief";
-import type { AlertEventType } from "@/types";
-import { ConsoleSender, type AlertMessage, type AlertSender } from "./sender";
+import type { AlertEventType, SkyBrief } from "@/types";
+import { ConsoleSender, createSender, type AlertMessage, type AlertSender } from "./sender";
 
 const ISS_ALERT_LEAD_MINUTES = 60;
 const SHOWER_ALERT_DAYS = 3;
 const AURORA_ALERT_LEVELS = ["MODERATE", "HIGH", "STORM"] as const;
+
+export interface SubscriptionLike {
+  id: string;
+  email: string;
+  lat: number;
+  lon: number;
+  events: string;
+}
 
 export interface DueAlert {
   subscriptionId: string;
@@ -19,6 +32,7 @@ export interface AlertCheckOptions {
   sender?: AlertSender;
   now?: Date;
   fetcher?: typeof fetch;
+  db?: DatabaseSync;
 }
 
 export interface AlertCheckResult {
@@ -31,26 +45,19 @@ function utcDateKey(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
-async function buildCandidates(
-  subscription: {
-    id: string;
-    email: string;
-    lat: number;
-    lon: number;
-    events: string;
-  },
+/**
+ * Pure decision logic: given a subscription and a computed sky brief, which
+ * alerts are due right now? No I/O — fully unit-testable.
+ */
+export function candidatesFromBrief(
+  subscription: SubscriptionLike,
+  brief: SkyBrief,
   now: Date,
-  fetcher: typeof fetch,
-): Promise<DueAlert[]> {
+): DueAlert[] {
   const events = subscription.events
     .split(",")
     .map((event) => event.trim())
     .filter(Boolean) as AlertEventType[];
-
-  const brief = await buildTonightBrief(
-    { lat: subscription.lat, lon: subscription.lon },
-    { now, fetcher },
-  );
 
   const candidates: DueAlert[] = [];
 
@@ -115,6 +122,18 @@ async function buildCandidates(
   return candidates;
 }
 
+async function buildCandidates(
+  subscription: SubscriptionLike,
+  now: Date,
+  fetcher: typeof fetch,
+): Promise<DueAlert[]> {
+  const brief = await buildTonightBrief(
+    { lat: subscription.lat, lon: subscription.lon },
+    { now, fetcher },
+  );
+  return candidatesFromBrief(subscription, brief, now);
+}
+
 /**
  * Evaluate every enabled subscription and dispatch any alerts that are due.
  * Deduplication is enforced atomically by the UNIQUE(subscription_id,
@@ -123,10 +142,10 @@ async function buildCandidates(
 export async function runAlertCheck(
   options: AlertCheckOptions = {},
 ): Promise<AlertCheckResult> {
-  const sender = options.sender ?? new ConsoleSender();
+  const sender = options.sender ?? createSender();
   const now = options.now ?? new Date();
   const fetcher = options.fetcher ?? fetch;
-  const db = getDb();
+  const db = options.db ?? getDb();
 
   const subscriptions = listEnabledSubscriptions(db);
   const dateKey = utcDateKey(now);
@@ -153,3 +172,6 @@ export async function runAlertCheck(
 
   return { checked: subscriptions.length, sent };
 }
+
+// Re-exported for callers that want an explicit console sender in tests/scripts.
+export { ConsoleSender };

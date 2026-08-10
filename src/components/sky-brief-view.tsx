@@ -13,10 +13,7 @@ import {
 import { buildTonightBrief } from "@/services/sky/brief";
 import type { LatLon } from "@/types";
 
-const AURORA_BADGES: Record<
-  string,
-  { label: string; className: string }
-> = {
+const AURORA_BADGES: Record<string, { label: string; className: string }> = {
   LOW: {
     label: "Low",
     className: "border-slate-600/50 bg-slate-500/10 text-slate-400",
@@ -50,7 +47,9 @@ function CardShell({
   return (
     <div className="glass glass-hover flex flex-col rounded-2xl p-5">
       <div className="mb-4 flex items-center gap-2.5">
-        <span className={`flex size-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 ${accent}`}>
+        <span
+          className={`flex size-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 ${accent}`}
+        >
           {icon}
         </span>
         <h3 className="text-sm font-semibold tracking-wide text-slate-200 uppercase">
@@ -65,9 +64,10 @@ function CardShell({
 export async function SkyBriefSection({ location }: { location: LatLon }) {
   const brief = await buildTonightBrief(location);
   const nextPasses = brief.issPasses.slice(0, 3);
+  const moon = brief.moon;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div className="grid gap-4 md:grid-cols-3">
         {/* ISS passes */}
         <CardShell
@@ -120,9 +120,7 @@ export async function SkyBriefSection({ location }: { location: LatLon }) {
           ) : (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
-                <span className="text-sm text-slate-300">
-                  Peak Kp tonight
-                </span>
+                <span className="text-sm text-slate-300">Peak Kp tonight</span>
                 <span
                   className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${AURORA_BADGES[brief.aurora.level].className}`}
                 >
@@ -135,7 +133,9 @@ export async function SkyBriefSection({ location }: { location: LatLon }) {
                 <div className="relative h-2 overflow-hidden rounded-full bg-white/10">
                   <div
                     className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-amber-400 to-rose-500"
-                    style={{ width: `${Math.min(100, (brief.aurora.maxKpTonight / 9) * 100)}%` }}
+                    style={{
+                      width: `${Math.min(100, (brief.aurora.maxKpTonight / 9) * 100)}%`,
+                    }}
                   />
                 </div>
                 <div className="mono mt-1.5 flex justify-between text-[10px] text-slate-500">
@@ -206,6 +206,108 @@ export async function SkyBriefSection({ location }: { location: LatLon }) {
         </CardShell>
       </div>
 
+      {/* Moon & best viewing window */}
+      <div className="glass glass-hover rounded-2xl p-6">
+        <div className="mb-5 flex items-center gap-2.5">
+          <span className="flex size-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-indigo-300">
+            <MoonStar className="size-4.5" />
+          </span>
+          <h3 className="text-sm font-semibold tracking-wide text-slate-200 uppercase">
+            Moon &amp; Best Viewing Window
+          </h3>
+        </div>
+
+        <div className="grid gap-6 md:grid-cols-3">
+          {/* Phase */}
+          <div className="flex items-center gap-4">
+            <div className="relative size-16 shrink-0">
+              <div className="absolute inset-0 rounded-full bg-gradient-to-br from-slate-100 via-slate-400 to-slate-700 shadow-[0_0_36px_-6px_rgba(226,232,255,0.45)]" />
+              <div
+                className="absolute inset-0 rounded-full bg-[#0a0a1c]"
+                style={{
+                  clipPath: moonClip(moon.illumination),
+                }}
+              />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-slate-100">
+                {moon.phaseName}
+              </p>
+              <div className="mt-2 h-1.5 w-28 overflow-hidden rounded-full bg-white/10">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-slate-300 to-indigo-300"
+                  style={{ width: `${Math.round(moon.illumination * 100)}%` }}
+                />
+              </div>
+              <p className="mt-1 text-xs text-slate-500">
+                {Math.round(moon.illumination * 100)}% illuminated
+              </p>
+            </div>
+          </div>
+
+          {/* Rise / set / dark hours */}
+          <div className="grid grid-cols-3 gap-3 self-center text-center">
+            <div className="rounded-xl border border-white/5 bg-white/[0.03] p-3">
+              <p className="text-[10px] tracking-wide text-slate-500 uppercase">
+                Moonrise
+              </p>
+              <p className="mono mt-1 text-sm text-slate-200">
+                {moon.moonrise ? formatTime(moon.moonrise) : "—"}
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/5 bg-white/[0.03] p-3">
+              <p className="text-[10px] tracking-wide text-slate-500 uppercase">
+                Moonset
+              </p>
+              <p className="mono mt-1 text-sm text-slate-200">
+                {moon.moonset ? formatTime(moon.moonset) : "—"}
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/5 bg-white/[0.03] p-3">
+              <p className="text-[10px] tracking-wide text-slate-500 uppercase">
+                Dark sky
+              </p>
+              <p className="mono mt-1 text-sm text-indigo-200">
+                ~{moon.darkHours} h
+              </p>
+            </div>
+          </div>
+
+          {/* Best window */}
+          <div className="flex flex-col justify-center rounded-xl border border-indigo-400/20 bg-indigo-400/5 p-4">
+            <p className="text-[10px] tracking-wide text-indigo-300/80 uppercase">
+              Best viewing window
+            </p>
+            {moon.moonDownAllNight ? (
+              <p className="mt-1 text-sm font-medium text-slate-100">
+                Moonless night ✨ — dark skies all night
+              </p>
+            ) : moon.bestViewingWindow ? (
+              <p className="mono mt-1 text-lg font-semibold text-indigo-200">
+                {formatTime(moon.bestViewingWindow.start)}
+                <span className="mx-1 text-xs text-slate-500">→</span>
+                {formatTime(moon.bestViewingWindow.end)}
+              </p>
+            ) : (
+              <p className="mt-1 text-sm text-slate-300">
+                Moon up all night — go for the brightest events
+              </p>
+            )}
+            {moon.bestViewingWindow && (
+              <p className="mt-1 text-xs text-slate-500">
+                {formatDuration(
+                  (moon.bestViewingWindow.end.getTime() -
+                    moon.bestViewingWindow.start.getTime()) /
+                    60_000,
+                )}{" "}
+                of moon-free sky — the dark window between moonset and
+                moonrise.
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* Section footer */}
       <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
         <span className="mono">
@@ -229,4 +331,16 @@ export async function SkyBriefSection({ location }: { location: LatLon }) {
       </div>
     </div>
   );
+}
+
+/**
+ * Clip-path for the moon disc: the unlit portion as an offset circle.
+ * illumination 0 = fully dark disc, 1 = fully lit disc.
+ */
+function moonClip(illumination: number) {
+  if (illumination >= 0.995) {
+    return "inset(0 0 0 0)"; // full moon — no overlay
+  }
+  const offset = 62 - illumination * 52; // px shift of the shadow circle
+  return `circle(50% at calc(50% + ${offset.toFixed(1)}px) 50%)`;
 }
