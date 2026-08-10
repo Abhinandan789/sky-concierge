@@ -13,15 +13,9 @@
     "test": "vitest run",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev",
-    "db:deploy": "prisma migrate deploy",
-    "db:studio": "prisma studio",
-    "check:alerts": "tsx --env-file-if-exists=.env scripts/check-alerts.ts",
-    "postinstall": "prisma generate"
+    "check:alerts": "tsx scripts/check-alerts.ts"
   },
   "dependencies": {
-    "@prisma/client": "^6",
     "clsx": "^2.1.1",
     "lucide-react": "^1.17.0",
     "next": "16.2.6",
@@ -42,10 +36,9 @@
     "eslint-config-prettier": "^10.1.8",
     "prettier": "^3.8.3",
     "prettier-plugin-tailwindcss": "^0.8.0",
-    "prisma": "^6",
     "tailwindcss": "^4",
     "tsx": "^4.19.2",
     "typescript": "^5",
-    "vitest": "^2.1.9"
+    "vitest": "^3.2.7"
   }
 }

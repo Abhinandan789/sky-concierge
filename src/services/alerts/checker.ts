@@ -1,5 +1,4 @@
-import { Prisma } from "@prisma/client";
-import { prisma } from "@/lib/prisma";
+import { getDb, insertAlertLogIfNotExists, listEnabledSubscriptions } from "@/lib/db";
 import { formatCompass, formatTime } from "@/lib/utils";
 import { buildTonightBrief } from "@/services/sky/brief";
 import type { AlertEventType } from "@/types";
@@ -30,13 +29,6 @@ export interface AlertCheckResult {
 /** UTC day key used for per-day alert deduplication, e.g. "2026-08-11". */
 function utcDateKey(date: Date) {
   return date.toISOString().slice(0, 10);
-}
-
-function isUniqueViolation(error: unknown) {
-  return (
-    error instanceof Prisma.PrismaClientKnownRequestError &&
-    error.code === "P2002"
-  );
 }
 
 async function buildCandidates(
@@ -125,8 +117,8 @@ async function buildCandidates(
 
 /**
  * Evaluate every enabled subscription and dispatch any alerts that are due.
- * Deduplication is enforced atomically by the (subscriptionId, eventType,
- * dateKey) unique index, so overlapping runs can never double-send.
+ * Deduplication is enforced atomically by the UNIQUE(subscription_id,
+ * event_type, date_key) index, so overlapping runs can never double-send.
  */
 export async function runAlertCheck(
   options: AlertCheckOptions = {},
@@ -134,33 +126,24 @@ export async function runAlertCheck(
   const sender = options.sender ?? new ConsoleSender();
   const now = options.now ?? new Date();
   const fetcher = options.fetcher ?? fetch;
+  const db = getDb();
 
-  const subscriptions = await prisma.alertSubscription.findMany({
-    where: { enabled: true },
-  });
+  const subscriptions = listEnabledSubscriptions(db);
+  const dateKey = utcDateKey(now);
 
   let sent = 0;
   for (const subscription of subscriptions) {
     const candidates = await buildCandidates(subscription, now, fetcher);
-    const dateKey = utcDateKey(now);
 
     for (const candidate of candidates) {
-      // Claim the alert atomically; a unique-violation means it was already
-      // sent for this event today.
-      try {
-        await prisma.alertLog.create({
-          data: {
-            subscriptionId: candidate.subscriptionId,
-            eventType: candidate.eventType,
-            message: candidate.message.subject,
-            dateKey,
-          },
-        });
-      } catch (error) {
-        if (isUniqueViolation(error)) {
-          continue;
-        }
-        throw error;
+      const claimed = insertAlertLogIfNotExists(db, {
+        subscriptionId: candidate.subscriptionId,
+        eventType: candidate.eventType,
+        message: candidate.message.subject,
+        dateKey,
+      });
+      if (!claimed) {
+        continue; // already alerted for this event today
       }
 
       await sender.send(candidate.email, candidate.message);

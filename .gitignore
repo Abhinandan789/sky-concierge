@@ -13,9 +13,8 @@ build/
 .env.local
 .env.*.local
 
-# prisma (local sqlite)
-prisma/*.db
-prisma/*.db-journal
+# local sqlite database
+data/
 
 # misc
 .DS_Store

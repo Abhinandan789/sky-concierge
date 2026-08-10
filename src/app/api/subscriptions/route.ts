@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { jsonError, jsonOk } from "@/lib/api";
-import { prisma } from "@/lib/prisma";
+import { getDb, upsertSubscription } from "@/lib/db";
 import { isEmail, parseNumber, validateLatLon } from "@/lib/utils";
 import { ALERT_EVENT_TYPES, type AlertEventType } from "@/types";
 
@@ -56,22 +56,13 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    // Upsert keeps one subscription per (email, lat, lon): re-subscribing
-    // refreshes the event selection instead of creating duplicates.
-    const subscription = await prisma.alertSubscription.upsert({
-      where: { email_lat_lon: { email, lat, lon } },
-      create: {
-        email,
-        lat,
-        lon,
-        events: events.join(","),
-        enabled: true,
-      },
-      update: { events: events.join(","), enabled: true },
-      select: { id: true },
+    const id = upsertSubscription(getDb(), {
+      email,
+      lat,
+      lon,
+      events: events.join(","),
     });
-
-    return jsonOk({ id: subscription.id }, { status: 201 });
+    return jsonOk({ id }, { status: 201 });
   } catch {
     return jsonError(
       "Could not save the subscription. Please try again.",
