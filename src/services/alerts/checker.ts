@@ -3,6 +3,7 @@ import {
   getDb,
   insertAlertLogIfNotExists,
   listEnabledSubscriptions,
+  removeAlertLog,
 } from "@/lib/db";
 import { formatCompass, formatTime } from "@/lib/utils";
 import { buildTonightBrief } from "@/services/sky/brief";
@@ -138,6 +139,8 @@ async function buildCandidates(
  * Evaluate every enabled subscription and dispatch any alerts that are due.
  * Deduplication is enforced atomically by the UNIQUE(subscription_id,
  * event_type, date_key) index, so overlapping runs can never double-send.
+ * If a send fails, its claim is rolled back and the run fails loudly, so the
+ * alert is retried on the next run rather than swallowed.
  */
 export async function runAlertCheck(
   options: AlertCheckOptions = {},
@@ -165,8 +168,19 @@ export async function runAlertCheck(
         continue; // already alerted for this event today
       }
 
-      await sender.send(candidate.email, candidate.message);
-      sent += 1;
+      try {
+        await sender.send(candidate.email, candidate.message);
+        sent += 1;
+      } catch (error) {
+        // Roll back the claim so a transient send failure doesn't swallow
+        // the alert — the next run will retry it. Then fail loudly.
+        removeAlertLog(db, {
+          subscriptionId: candidate.subscriptionId,
+          eventType: candidate.eventType,
+          dateKey,
+        });
+        throw error;
+      }
     }
   }
 

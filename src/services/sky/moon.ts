@@ -20,7 +20,6 @@ export function phaseName(phase: number): string {
 
 const DARK_SAMPLE_MINUTES = 30;
 const MIN_DARK_WINDOW_MINUTES = 30;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 interface DarkWindow {
   start: Date;
@@ -78,7 +77,8 @@ function findDarkWindows(
  * window. Instead we anchor on the observer's **solar noon** — a property of
  * the coordinates, so it is timezone-agnostic:
  *   1. take the server-local day containing `now`;
- *   2. if `now` precedes that day's solar noon, step back one day;
+ *   2. if `now` precedes that day's solar noon, step back one day
+ *      (via calendar arithmetic, so DST-transition days stay correct);
  *   3. tonight = [thatDay.night, nextDay.nightEnd].
  */
 function getTonightBounds(
@@ -89,15 +89,20 @@ function getTonightBounds(
     new Date(date.getFullYear(), date.getMonth(), date.getDate());
 
   let day = startOfLocalDay(now);
-  const solarNoon = SunCalc.getTimes(day, location.lat, location.lon).solarNoon;
+  let dayTimes = SunCalc.getTimes(day, location.lat, location.lon);
+  const solarNoon = dayTimes.solarNoon;
   if (!solarNoon) return null;
 
   if (now.getTime() < solarNoon.getTime()) {
-    day = new Date(day.getTime() - DAY_MS);
+    day = new Date(day.getFullYear(), day.getMonth(), day.getDate() - 1);
+    dayTimes = SunCalc.getTimes(day, location.lat, location.lon);
   }
 
-  const dayTimes = SunCalc.getTimes(day, location.lat, location.lon);
-  const nextDay = new Date(day.getTime() + DAY_MS);
+  const nextDay = new Date(
+    day.getFullYear(),
+    day.getMonth(),
+    day.getDate() + 1,
+  );
   const nextDayTimes = SunCalc.getTimes(nextDay, location.lat, location.lon);
 
   const start = dayTimes.night;
@@ -129,30 +134,33 @@ export function computeMoonInfo(location: LatLon, now: Date): MoonInfo {
   }
 
   const { start: nightStart, end: nightEnd } = bounds;
-  const darkWindows = findDarkWindows(location, nightStart, nightEnd).filter(
-    (window) =>
-      window.end.getTime() - window.start.getTime() >=
-      MIN_DARK_WINDOW_MINUTES * 60_000,
+
+  // All below-horizon time counts toward darkHours; the minimum-duration
+  // filter applies only when picking a *recommended* window, so a night with
+  // brief moon-free bursts is still reported as dark.
+  const darkWindows = findDarkWindows(location, nightStart, nightEnd);
+  const darkMinutes = darkWindows.reduce(
+    (sum, window) =>
+      sum + (window.end.getTime() - window.start.getTime()) / 60_000,
+    0,
   );
 
   let bestViewingWindow: ViewingWindow | null = null;
   for (const window of darkWindows) {
     const duration = window.end.getTime() - window.start.getTime();
     if (
-      bestViewingWindow === null ||
-      duration >
-        bestViewingWindow.end.getTime() - bestViewingWindow.start.getTime()
+      duration < MIN_DARK_WINDOW_MINUTES * 60_000 ||
+      (bestViewingWindow !== null &&
+        duration <=
+          bestViewingWindow.end.getTime() -
+            bestViewingWindow.start.getTime())
     ) {
-      bestViewingWindow = window;
+      continue;
     }
+    bestViewingWindow = window;
   }
 
   const nightMinutes = (nightEnd.getTime() - nightStart.getTime()) / 60_000;
-  const darkMinutes = darkWindows.reduce(
-    (sum, window) =>
-      sum + (window.end.getTime() - window.start.getTime()) / 60_000,
-    0,
-  );
 
   return {
     illumination: Math.round(illumination.fraction * 100) / 100,

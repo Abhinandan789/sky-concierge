@@ -136,3 +136,17 @@ export function insertAlertLogIfNotExists(
     );
   return result.changes > 0;
 }
+
+/**
+ * Remove a claimed alert log entry. Used to roll back a claim when the send
+ * fails, so the alert is retried on the next run instead of being swallowed.
+ */
+export function removeAlertLog(
+  db: DatabaseSync,
+  input: { subscriptionId: string; eventType: string; dateKey: string },
+): void {
+  db.prepare(
+    `DELETE FROM alert_logs
+     WHERE subscription_id = ? AND event_type = ? AND date_key = ?`,
+  ).run(input.subscriptionId, input.eventType, input.dateKey);
+}

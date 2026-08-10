@@ -195,6 +195,38 @@ describe("runAlertCheck", () => {
     expect(sender.send).toHaveBeenCalledTimes(1);
   });
 
+  it("rolls back the claim and rethrows when a send fails, then retries", async () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "retry@example.com",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+
+    const failingSender = {
+      send: vi.fn(async () => {
+        throw new Error("smtp down");
+      }),
+    };
+    const now = new Date(2026, 7, 11, 20, 0, 0);
+
+    await expect(
+      runAlertCheck({ db, sender: failingSender, now, fetcher: offlineFetcher }),
+    ).rejects.toThrow("smtp down");
+
+    // The claim was rolled back, so a healthy sender retries successfully.
+    const healthySender = { send: vi.fn(async () => undefined) };
+    const retry = await runAlertCheck({
+      db,
+      sender: healthySender,
+      now,
+      fetcher: offlineFetcher,
+    });
+    expect(retry.sent).toBe(1);
+    expect(healthySender.send).toHaveBeenCalledTimes(1);
+  });
+
   it("reports zero when nothing is due (no network needed)", async () => {
     const db = createSkyDb(":memory:");
     upsertSubscription(db, {
