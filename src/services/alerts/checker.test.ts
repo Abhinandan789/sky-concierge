@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createSkyDb,
+  listEnabledPushSubscriptions,
   upsertPushSubscription,
   upsertSubscription,
 } from "@/lib/db";
 import { formatTime } from "@/lib/utils";
 import type { IssPass, SkyBrief } from "@/types";
+import { sendPush } from "./push";
 import {
   candidatesFromBrief,
   composeDigestMessage,
@@ -13,6 +15,11 @@ import {
   runAlertCheck,
   runDigestCheck,
 } from "./checker";
+
+// Control push dispatch directly; the real sendPush no-ops without VAPID keys.
+vi.mock("./push", () => ({
+  sendPush: vi.fn(async () => undefined),
+}));
 
 const NOW = new Date("2026-08-11T20:00:00Z");
 
@@ -342,6 +349,67 @@ describe("runAlertCheck", () => {
       .prepare(`SELECT event_type AS eventType FROM push_logs`)
       .all() as { eventType: string }[];
     expect(logs.map((log) => log.eventType)).toContain("showers");
+  });
+
+  it("disables a push endpoint that returns a permanent 404/410 and keeps going", async () => {
+    const db = createSkyDb(":memory:");
+    upsertPushSubscription(db, {
+      endpoint: "https://push.example.com/stale",
+      p256dh: "key",
+      auth: "auth",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+
+    const sender = { send: vi.fn(async () => undefined) };
+    vi.mocked(sendPush).mockRejectedValueOnce(
+      Object.assign(new Error("gone"), { statusCode: 410 }),
+    );
+
+    // Must not throw: a stale endpoint must not poison the whole run.
+    const result = await runAlertCheck({
+      db,
+      sender,
+      now: new Date(2026, 7, 11, 20, 0, 0),
+      fetcher: offlineFetcher,
+    });
+    expect(sender.send).not.toHaveBeenCalled();
+    expect(result.checked).toBe(1);
+    // The revoked endpoint is disabled and the claim rolled back, so the
+    // next run is clean and the endpoint is never retried.
+    expect(listEnabledPushSubscriptions(db)).toHaveLength(0);
+    expect(
+      (
+        db.prepare(`SELECT COUNT(*) AS n FROM push_logs`).get() as {
+          n: number;
+        }
+      ).n,
+    ).toBe(0);
+  });
+
+  it("still rethrows transient push failures for a retry", async () => {
+    const db = createSkyDb(":memory:");
+    upsertPushSubscription(db, {
+      endpoint: "https://push.example.com/flaky",
+      p256dh: "key",
+      auth: "auth",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+
+    vi.mocked(sendPush).mockRejectedValueOnce(new Error("service down"));
+    await expect(
+      runAlertCheck({
+        db,
+        sender: { send: vi.fn(async () => undefined) },
+        now: new Date(2026, 7, 11, 20, 0, 0),
+        fetcher: offlineFetcher,
+      }),
+    ).rejects.toThrow("service down");
+    // The endpoint stays enabled for the next run's retry.
+    expect(listEnabledPushSubscriptions(db)).toHaveLength(1);
   });
 
   it("does not double-evaluate push subs already covered by a nearby email sub", async () => {

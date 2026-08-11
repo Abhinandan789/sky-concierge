@@ -78,14 +78,24 @@ export async function buildTonightBrief(
       const ids = resolveNoradIds(options.noradIds);
       const all: IssPass[] = [];
       for (const id of ids) {
-        const tle = await getCachedTleSet(id, fetcher);
-        const passes = findSatellitePasses(tle.line1, tle.line2, location, {
-          now,
-          windowHours: options.windowHours,
-        });
-        all.push(
-          ...passes.map((pass) => ({ ...pass, satelliteName: tle.name })),
-        );
+        // Each satellite is fetched independently so one bad NORAD id (or a
+        // transient CelesTrak miss) degrades that satellite only — the rest
+        // of the selection still gets its passes.
+        try {
+          const tle = await getCachedTleSet(id, fetcher);
+          const passes = findSatellitePasses(tle.line1, tle.line2, location, {
+            now,
+            windowHours: options.windowHours,
+          });
+          all.push(
+            ...passes.map((pass) => ({ ...pass, satelliteName: tle.name })),
+          );
+        } catch (error) {
+          errors.push({
+            section: "iss",
+            message: `NORAD ${id}: ${errorMessage(error)}`,
+          });
+        }
       }
       all.sort((a, b) => a.start.getTime() - b.start.getTime());
       return all;
@@ -150,6 +160,19 @@ export async function buildTonightBrief(
   // --- Moon & viewing window ---
   const moon: MoonInfo = computeMoonInfo(location, now);
 
+  // Collapse per-satellite failures into one entry per section.
+  const mergedErrors: SkyBriefError[] = [];
+  for (const error of errors) {
+    const existing = mergedErrors.find(
+      (candidate) => candidate.section === error.section,
+    );
+    if (existing) {
+      existing.message = `${existing.message}; ${error.message}`;
+    } else {
+      mergedErrors.push({ ...error });
+    }
+  }
+
   return {
     location,
     generatedAt: now,
@@ -160,6 +183,6 @@ export async function buildTonightBrief(
     clouds,
     planets,
     conjunctions,
-    errors,
+    errors: mergedErrors,
   };
 }

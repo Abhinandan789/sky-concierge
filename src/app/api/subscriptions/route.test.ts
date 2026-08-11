@@ -136,12 +136,10 @@ describe("POST /api/subscriptions", () => {
     expect(listEnabledSubscriptions(getDb())).toHaveLength(0);
   });
 
-  it("never exposes or rotates the token for an already-verified address", async () => {
+  it("never exposes, rotates, or applies changes for an already-verified address", async () => {
     vi.stubEnv("RESEND_API_KEY", "test-key");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("{}", { status: 200 })),
-    );
+    const resendMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", resendMock);
 
     // The owner signs up and confirms via the email link.
     const first = await subscribePost(post("/api/subscriptions", VALID_BODY));
@@ -164,22 +162,55 @@ describe("POST /api/subscriptions", () => {
         .get(VALID_BODY.email) as { unsubscribeToken: string }
     ).unsubscribeToken;
 
-    // Someone who doesn't control the mailbox re-submits the same details…
+    // Someone who doesn't control the mailbox re-submits the address with
+    // different events — the change must NOT apply…
     const resubmit = await subscribePost(
-      post("/api/subscriptions", VALID_BODY),
+      post("/api/subscriptions", { ...VALID_BODY, events: ["showers"] }),
     );
     const resubmitBody = await resubmit.json();
     expect(resubmitBody.data.verified).toBe(true);
     expect(resubmitBody.data.unsubscribeToken).toBeUndefined();
 
-    // …and can neither harvest nor rotate the owner's unsubscribe token.
-    const after = getDb()
+    // …and the owner gets a confirmation email before anything mutates.
+    expect(resendMock).toHaveBeenCalledTimes(2);
+    const row = getDb()
       .prepare(
-        `SELECT unsubscribe_token AS unsubscribeToken
+        `SELECT unsubscribe_token AS unsubscribeToken, events,
+                pending_events AS pendingEvents
          FROM alert_subscriptions WHERE email = ?`,
       )
-      .get(VALID_BODY.email) as { unsubscribeToken: string };
-    expect(after.unsubscribeToken).toBe(ownerToken);
+      .get(VALID_BODY.email) as {
+      unsubscribeToken: string;
+      events: string;
+      pendingEvents: string | null;
+    };
+    expect(row.unsubscribeToken).toBe(ownerToken);
+    expect(row.events).toBe("iss,aurora");
+    expect(row.pendingEvents).toBe("showers");
+
+    // The owner's confirmation is what authorizes the change.
+    const freshVerifyToken = (
+      getDb()
+        .prepare(
+          `SELECT verify_token AS verifyToken
+         FROM alert_subscriptions WHERE email = ?`,
+        )
+        .get(VALID_BODY.email) as { verifyToken: string }
+    ).verifyToken;
+    await verifyPost(
+      post("/api/subscriptions/verify", { token: freshVerifyToken }),
+    );
+    const applied = getDb()
+      .prepare(
+        `SELECT events, pending_events AS pendingEvents
+         FROM alert_subscriptions WHERE email = ?`,
+      )
+      .get(VALID_BODY.email) as {
+      events: string;
+      pendingEvents: string | null;
+    };
+    expect(applied.events).toBe("showers");
+    expect(applied.pendingEvents).toBeNull();
   });
 
   it("rate limits repeated signups from one IP", async () => {

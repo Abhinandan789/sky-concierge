@@ -93,7 +93,7 @@ describe("SQLite data layer", () => {
     expect(listed[0].email).toBe("a@b.co");
   });
 
-  it("keeps a verified row's unsubscribe token stable across unverified re-submits", () => {
+  it("never mutates a verified row on an unverified re-submit — changes wait for confirmation", () => {
     const db = createSkyDb(":memory:");
     const first = upsertSubscription(db, {
       email: "a@b.co",
@@ -102,9 +102,8 @@ describe("SQLite data layer", () => {
       events: "iss",
     });
 
-    // Re-submitting as unverified (double opt-in pending) must not rotate the
-    // verified row's token — that would let anyone who knows an address and
-    // coordinates invalidate the owner's saved unsubscribe link.
+    // An unverified request (double opt-in pending) tries to change the
+    // events — it must NOT apply, and must not rotate the owner's token.
     const second = upsertSubscription(db, {
       email: "a@b.co",
       lat: 40.7,
@@ -114,8 +113,86 @@ describe("SQLite data layer", () => {
     });
     expect(second.verified).toBe(true);
     expect(second.unsubscribeToken).toBe(first.unsubscribeToken);
+    expect(second.pendingChange).toBe(true);
+    const row = db
+      .prepare(
+        `SELECT events, enabled, pending_events AS pendingEvents
+         FROM alert_subscriptions WHERE email = 'a@b.co'`,
+      )
+      .get() as {
+      events: string;
+      enabled: number;
+      pendingEvents: string | null;
+    };
+    expect(row.events).toBe("iss"); // unchanged
+    expect(row.enabled).toBe(1);
+    expect(row.pendingEvents).toBe("iss,aurora"); // parked, not applied
 
-    // A never-confirmed row still gets fresh tokens on every re-submit.
+    // The owner confirming the email is what authorizes the change.
+    expect(verifySubscription(db, second.verifyToken)).toBe(true);
+    const after = db
+      .prepare(
+        `SELECT events, enabled, pending_events AS pendingEvents
+         FROM alert_subscriptions WHERE email = 'a@b.co'`,
+      )
+      .get() as {
+      events: string;
+      enabled: number;
+      pendingEvents: string | null;
+    };
+    expect(after.events).toBe("iss,aurora");
+    expect(after.enabled).toBe(1);
+    expect(after.pendingEvents).toBeNull();
+  });
+
+  it("cannot re-enable an opted-out subscription without confirmation", () => {
+    const db = createSkyDb(":memory:");
+    const first = upsertSubscription(db, {
+      email: "out@x.co",
+      lat: 10,
+      lon: 20,
+      events: "iss",
+    });
+    disableSubscription(db, first.unsubscribeToken);
+    expect(
+      (
+        db.prepare("SELECT enabled FROM alert_subscriptions").get() as {
+          enabled: number;
+        }
+      ).enabled,
+    ).toBe(0);
+
+    // Same events, but the request is unverified — re-enabling is parked too.
+    const resubmit = upsertSubscription(db, {
+      email: "out@x.co",
+      lat: 10,
+      lon: 20,
+      events: "iss",
+      verified: false,
+    });
+    expect(resubmit.pendingChange).toBe(true);
+    expect(
+      (
+        db.prepare("SELECT enabled FROM alert_subscriptions").get() as {
+          enabled: number;
+        }
+      ).enabled,
+    ).toBe(0);
+
+    // Confirming the email re-enables and clears the pending change.
+    expect(verifySubscription(db, resubmit.verifyToken)).toBe(true);
+    const after = db
+      .prepare(
+        `SELECT enabled, pending_events AS pendingEvents
+         FROM alert_subscriptions`,
+      )
+      .get() as { enabled: number; pendingEvents: string | null };
+    expect(after.enabled).toBe(1);
+    expect(after.pendingEvents).toBeNull();
+  });
+
+  it("a never-confirmed row still gets fresh tokens on every re-submit", () => {
+    const db = createSkyDb(":memory:");
     const pending = upsertSubscription(db, {
       email: "p@q.co",
       lat: 1,

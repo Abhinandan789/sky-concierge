@@ -14,6 +14,9 @@ export interface AlertSubscriptionRow {
   verified: number;
   verifyToken: string | null;
   unsubscribeToken: string | null;
+  /** Events requested by an unverified re-submit of a verified row; applied
+   * only after the owner confirms (NULL = no pending change). */
+  pendingEvents: string | null;
   createdAt: string;
 }
 
@@ -40,13 +43,13 @@ export interface PushSubscriptionRow {
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS alert_subscriptions (
-  id         TEXT PRIMARY KEY,
-  email      TEXT NOT NULL,
-  lat        REAL NOT NULL,
-  lon        REAL NOT NULL,
-  events     TEXT NOT NULL DEFAULT 'iss,aurora,showers',
-  enabled    INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  id             TEXT PRIMARY KEY,
+  email          TEXT NOT NULL,
+  lat            REAL NOT NULL,
+  lon            REAL NOT NULL,
+  events         TEXT NOT NULL DEFAULT 'iss,aurora,showers',
+  enabled        INTEGER NOT NULL DEFAULT 1,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(email, lat, lon)
 );
 
@@ -135,6 +138,12 @@ export function createSkyDb(path: string): DatabaseSync {
     "unsubscribe_token",
     "unsubscribe_token TEXT",
   );
+  ensureColumn(
+    db,
+    "alert_subscriptions",
+    "pending_events",
+    "pending_events TEXT",
+  );
 
   // Existing subscribers predate double opt-in; treat them as verified and
   // give them unsubscribe tokens so links work immediately.
@@ -183,13 +192,21 @@ export interface UpsertSubscriptionResult {
   verified: boolean;
   verifyToken: string;
   unsubscribeToken: string;
+  /** True when the request only changed events/enabled pending confirmation
+   * (an unverified re-submit of an already-verified row). */
+  pendingChange: boolean;
 }
 
 /**
  * Create or refresh a subscription for (email, lat, lon). Returns the
- * subscription id — the same id on re-subscribe, so no duplicates. Re-subscribing
- * an already-verified subscriber keeps them verified; unverified ones get a
- * fresh confirmation token.
+ * subscription id — the same id on re-subscribe, so no duplicates.
+ *
+ * Security model for unverified re-submits (double opt-in): a request that
+ * isn't verified may never mutate an already-verified row's events or
+ * enabled state. Instead the requested events are parked in pending_events
+ * and applied only after the owner confirms via email. An attacker who
+ * knows an address + coordinates can therefore neither re-enable an
+ * opted-out subscription nor change which alerts the owner receives.
  */
 export function upsertSubscription(
   db: DatabaseSync,
@@ -202,20 +219,37 @@ export function upsertSubscription(
 
   db.prepare(
     `INSERT INTO alert_subscriptions
-       (id, email, lat, lon, events, enabled, verified, verify_token, unsubscribe_token)
-     VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+       (id, email, lat, lon, events, enabled, verified, verify_token,
+        unsubscribe_token, pending_events)
+     VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, NULL)
      ON CONFLICT(email, lat, lon) DO UPDATE SET
-       events = excluded.events,
-       enabled = 1,
        verified = MAX(alert_subscriptions.verified, excluded.verified),
        verify_token = excluded.verify_token,
        -- A verified row keeps its unsubscribe token: an unverified re-submit
-       -- (e.g. someone submitting an address they don't control) must neither
-       -- harvest nor rotate the owner's token. Unverified rows get fresh ones.
+       -- must neither harvest nor rotate the owner's token.
        unsubscribe_token = CASE
          WHEN alert_subscriptions.verified = 1
            THEN alert_subscriptions.unsubscribe_token
            ELSE excluded.unsubscribe_token
+       END,
+       -- Verified requests (console mode) and pending rows apply immediately.
+       events = CASE
+         WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0
+           THEN excluded.events
+           ELSE alert_subscriptions.events
+       END,
+       enabled = CASE
+         WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0
+           THEN 1
+           ELSE alert_subscriptions.enabled
+       END,
+       -- Park changes to a verified row until the owner confirms: different
+       -- events, or a re-enable request against an opted-out subscription.
+       pending_events = CASE
+         WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0 THEN NULL
+         WHEN excluded.events != alert_subscriptions.events THEN excluded.events
+         WHEN alert_subscriptions.enabled = 0 THEN alert_subscriptions.events
+         ELSE alert_subscriptions.pending_events
        END`,
   ).run(
     randomUUID(),
@@ -230,7 +264,7 @@ export function upsertSubscription(
 
   const row = db
     .prepare(
-      `SELECT id, verified, verify_token, unsubscribe_token
+      `SELECT id, verified, verify_token, unsubscribe_token, pending_events
        FROM alert_subscriptions WHERE email = ? AND lat = ? AND lon = ?`,
     )
     .get(email, lat, lon) as
@@ -239,6 +273,7 @@ export function upsertSubscription(
         verified: number;
         verify_token: string;
         unsubscribe_token: string;
+        pending_events: string | null;
       }
     | undefined;
 
@@ -250,6 +285,7 @@ export function upsertSubscription(
     verified: row.verified === 1,
     verifyToken: row.verify_token,
     unsubscribeToken: row.unsubscribe_token,
+    pendingChange: row.pending_events !== null,
   };
 }
 
@@ -278,11 +314,20 @@ export function disableSubscription(db: DatabaseSync, token: string): boolean {
   return result.changes > 0;
 }
 
-/** Confirm a subscription's email by its verification token. */
+/**
+ * Confirm a subscription's email by its verification token. Also applies any
+ * pending events (an unverified re-submit's requested changes) — the owner
+ * confirming the email is the authorization for those mutations.
+ */
 export function verifySubscription(db: DatabaseSync, token: string): boolean {
   const result = db
     .prepare(
-      `UPDATE alert_subscriptions SET verified = 1 WHERE verify_token = ?`,
+      `UPDATE alert_subscriptions
+       SET verified = 1,
+           events = COALESCE(pending_events, events),
+           enabled = 1,
+           pending_events = NULL
+       WHERE verify_token = ?`,
     )
     .run(token);
   return result.changes > 0;

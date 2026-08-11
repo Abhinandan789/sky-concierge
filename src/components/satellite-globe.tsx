@@ -83,29 +83,73 @@ function makeGlowSprite(color: string): THREE.Sprite {
   return sprite;
 }
 
-/** Canvas text sprite used for satellite + observer labels. */
+/**
+ * Compact "pill tag" label: a rounded dark backdrop with a colored border,
+ * drawn on an oversized canvas so long satellite names never truncate. The
+ * sprite is small relative to the globe (~1/6 of its radius) — the previous
+ * version rendered as oversized floating text.
+ */
 function makeLabelSprite(text: string, color: string): THREE.Sprite {
+  const font = "600 30px ui-sans-serif, system-ui, sans-serif";
   const canvas = document.createElement("canvas");
+  // Oversized so measured text always fits; transparent margins are cropped
+  // visually by keeping the sprite box proportional to the drawn pill.
+  canvas.width = 512;
+  canvas.height = 96;
   const ctx = canvas.getContext("2d")!;
-  const font = "600 28px ui-sans-serif, system-ui, sans-serif";
   ctx.font = font;
-  const width = Math.max(64, ctx.measureText(text).width + 28);
-  canvas.width = width;
-  canvas.height = 48;
+  const textWidth = ctx.measureText(text).width;
+  const padX = 24;
+  const pillWidth = Math.min(500, textWidth + padX * 2);
+  const pillHeight = 60;
+  const x = (canvas.width - pillWidth) / 2;
+  const y = (canvas.height - pillHeight) / 2;
+
+  // Rounded pill backdrop (dark navy, matches the app's cards).
+  const radius = pillHeight / 2;
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + pillWidth - radius, y);
+  ctx.arcTo(x + pillWidth, y, x + pillWidth, y + radius, radius);
+  ctx.lineTo(x + pillWidth, y + pillHeight - radius);
+  ctx.arcTo(
+    x + pillWidth,
+    y + pillHeight,
+    x + pillWidth - radius,
+    y + pillHeight,
+    radius,
+  );
+  ctx.lineTo(x + radius, y + pillHeight);
+  ctx.arcTo(x, y + pillHeight, x, y + pillHeight - radius, radius);
+  ctx.lineTo(x, y + radius);
+  ctx.arcTo(x, y, x + radius, y, radius);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(6, 10, 24, 0.82)";
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = color;
+  ctx.stroke();
+
+  // Label text (white on the dark pill).
   ctx.font = font;
-  ctx.fillStyle = color;
+  ctx.fillStyle = "#e2e8f0";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText(text, width / 2, 24);
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 1);
+
   const texture = new THREE.CanvasTexture(canvas);
   const sprite = new THREE.Sprite(
     new THREE.SpriteMaterial({
       map: texture,
       transparent: true,
       depthWrite: false,
+      depthTest: true,
     }),
   );
-  sprite.scale.set(width / 90, 0.5, 1);
+  // World-space size: ~0.15 of the globe radius tall, width proportional to
+  // the text so tags stay tidy next to the blips.
+  const height = 0.15;
+  sprite.scale.set((pillWidth / pillHeight) * height, height, 1);
   return sprite;
 }
 
@@ -281,12 +325,12 @@ function createGlobeView(container: HTMLDivElement): GlobeView {
       youLabel.material.dispose();
     }
     youGlow = makeGlowSprite("#67e8f9");
-    youGlow.scale.set(0.06, 0.06, 1);
+    youGlow.scale.set(0.05, 0.05, 1);
     youGlow.position.copy(latLonAltToVector3(lat, lon, 0));
     earthGroup.add(youGlow);
-    youLabel = makeLabelSprite("You", "#a5f3fc");
+    youLabel = makeLabelSprite("You", "#67e8f9");
     youLabel.position.copy(latLonAltToVector3(lat, lon, 0));
-    youLabel.position.y += 0.05;
+    youLabel.position.y += 0.11;
     earthGroup.add(youLabel);
   };
 
@@ -313,7 +357,7 @@ function createGlobeView(container: HTMLDivElement): GlobeView {
         );
         if (label) {
           label.position.copy(blip.position);
-          label.position.y += 0.07;
+          label.position.y += 0.12;
         }
       }
     }

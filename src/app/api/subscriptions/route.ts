@@ -99,19 +99,31 @@ export async function POST(request: NextRequest) {
       verified: !needsVerification,
     });
 
-    if (needsVerification && !subscription.verified) {
+    // A pending change means an unverified request tried to alter an
+    // already-verified subscription — the owner must confirm before the new
+    // events/re-enable are applied, so email them a confirmation link too.
+    if (
+      needsVerification &&
+      (!subscription.verified || subscription.pendingChange)
+    ) {
       const confirmUrl = `${siteUrl()}/verify?token=${subscription.verifyToken}`;
       try {
         await createSender().send(email, {
-          subject: "Confirm your Sky Concierge alerts",
+          subject: subscription.pendingChange
+            ? "Confirm your Sky Concierge alert changes"
+            : "Confirm your Sky Concierge alerts",
           body: [
-            "Thanks for subscribing to Sky Concierge!",
+            subscription.pendingChange
+              ? "Someone (possibly you) requested to update this Sky Concierge subscription."
+              : "Thanks for subscribing to Sky Concierge!",
             "",
-            "One more step: confirm your email to start receiving alerts.",
+            subscription.pendingChange
+              ? "Confirm your email to apply the changes."
+              : "One more step: confirm your email to start receiving alerts.",
             "",
             confirmUrl,
             "",
-            "If you didn't sign up, you can safely ignore this email.",
+            "If you didn't request this, you can safely ignore this email — nothing changes.",
           ].join("\n"),
         });
       } catch (error) {

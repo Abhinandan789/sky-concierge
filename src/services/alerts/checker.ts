@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { siteUrl } from "@/config/site";
 import {
+  disablePushSubscription,
   getDb,
   insertAlertLogIfNotExists,
   insertPushLogIfNotExists,
@@ -10,6 +11,7 @@ import {
   removePushLog,
   type PushSubscriptionRow,
 } from "@/lib/db";
+import { logger } from "@/lib/logger";
 import {
   formatCompass,
   formatDayTime,
@@ -254,12 +256,24 @@ async function dispatchPushAlerts(params: {
         });
         sent += 1;
       } catch (error) {
-        // Roll back so the notification retries on the next run, then fail loudly.
+        // Roll back so the notification retries on the next run.
         removePushLog(db, {
           subscriptionId: pushSub.id,
           eventType: candidate.eventType,
           dateKey,
         });
+        // A permanent 404/410 means the browser revoked or lost this push
+        // endpoint — retrying it forever would poison every cron run. Disable
+        // it and move on; only transient failures rethrow for a retry.
+        const statusCode = (error as { statusCode?: number }).statusCode;
+        if (statusCode === 404 || statusCode === 410) {
+          disablePushSubscription(db, pushSub.endpoint);
+          logger.warn("Push endpoint expired — disabled", {
+            endpoint: pushSub.endpoint,
+            statusCode,
+          });
+          continue;
+        }
         throw error;
       }
     }
