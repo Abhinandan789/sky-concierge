@@ -165,8 +165,8 @@ export function SatellitePicker({ selected, location }: SatellitePickerProps) {
       </div>
       <p className="mt-2.5 text-[11px] leading-relaxed text-slate-500">
         Pass times are recomputed for the selection — up to{" "}
-        {MAX_TRACKED_SATELLITES} at once. Alerts use the server-configured set
-        (see <span className="mono">ISS_NORAD_IDS</span>).
+        {MAX_TRACKED_SATELLITES} at once. Alert emails use the same selection
+        when you subscribe below.
       </p>
     </div>
   );

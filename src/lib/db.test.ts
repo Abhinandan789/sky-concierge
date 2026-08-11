@@ -191,6 +191,83 @@ describe("SQLite data layer", () => {
     expect(after.pendingEvents).toBeNull();
   });
 
+  it("stores per-subscription satellite ids (NULL = server default)", () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "multi@x.co",
+      lat: 40.7,
+      lon: -74,
+      events: "iss",
+      satelliteIds: "48274,25544",
+    });
+
+    const listed = listEnabledSubscriptions(db);
+    expect(listed).toHaveLength(1);
+    expect(listed[0].satelliteIds).toBe("48274,25544");
+
+    // No selection → NULL, so the checker falls back to the server set.
+    upsertSubscription(db, {
+      email: "default@x.co",
+      lat: 51.5,
+      lon: -0.1,
+      events: "iss",
+    });
+    const [multi, fallback] = listEnabledSubscriptions(db);
+    expect(multi.satelliteIds).toBe("48274,25544");
+    expect(fallback.satelliteIds).toBeNull();
+  });
+
+  it("parks a satellite change from an unverified re-submit until confirmation", () => {
+    const db = createSkyDb(":memory:");
+    const first = upsertSubscription(db, {
+      email: "a@b.co",
+      lat: 40.7,
+      lon: -74,
+      events: "iss",
+      satelliteIds: "25544",
+    });
+
+    // Unverified re-submit asks to track a different satellite — the stored
+    // ids must NOT change until the owner confirms the email.
+    const second = upsertSubscription(db, {
+      email: "a@b.co",
+      lat: 40.7,
+      lon: -74,
+      events: "iss",
+      satelliteIds: "48274",
+      verified: false,
+    });
+    expect(second.pendingChange).toBe(true);
+    expect(second.unsubscribeToken).toBe(first.unsubscribeToken);
+    const row = db
+      .prepare(
+        `SELECT satellite_ids AS satelliteIds,
+                pending_satellite_ids AS pendingSatelliteIds
+         FROM alert_subscriptions WHERE email = 'a@b.co'`,
+      )
+      .get() as {
+      satelliteIds: string | null;
+      pendingSatelliteIds: string | null;
+    };
+    expect(row.satelliteIds).toBe("25544"); // unchanged
+    expect(row.pendingSatelliteIds).toBe("48274"); // parked
+
+    // Confirming applies the parked satellite change.
+    expect(verifySubscription(db, second.verifyToken)).toBe(true);
+    const after = db
+      .prepare(
+        `SELECT satellite_ids AS satelliteIds,
+                pending_satellite_ids AS pendingSatelliteIds
+         FROM alert_subscriptions WHERE email = 'a@b.co'`,
+      )
+      .get() as {
+      satelliteIds: string | null;
+      pendingSatelliteIds: string | null;
+    };
+    expect(after.satelliteIds).toBe("48274");
+    expect(after.pendingSatelliteIds).toBeNull();
+  });
+
   it("a never-confirmed row still gets fresh tokens on every re-submit", () => {
     const db = createSkyDb(":memory:");
     const pending = upsertSubscription(db, {

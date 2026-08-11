@@ -11,6 +11,7 @@ import {
   type GroundTrackPoint,
 } from "@/lib/satellite-map";
 import type { LatLon } from "@/types";
+import type { MoonTrack } from "@/services/sky/moon-track";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { SatelliteGlobeHud } from "./satellite-globe-hud";
@@ -35,6 +36,8 @@ const TRACK_REFRESH_MS = 60_000;
 /** Lift applied to ground tracks so they don't z-fight the surface. */
 const TRACK_LIFT_KM = 10;
 const COLORS = ["#22d3ee", "#fbbf24", "#e879f9", "#34d399"];
+/** Moon overlay color — a neutral white ring, distinct from satellite dots. */
+const MOON_COLOR = "#f1f5f9";
 /** How often telemetry (altitude/velocity/elevation) reaches the HUD. */
 const TELEMETRY_INTERVAL_MS = 500;
 /** Pointer movement (px) under which a press counts as a click, not a drag. */
@@ -68,6 +71,49 @@ function latLonAltToVector3(
     radius * Math.cos(phi),
     radius * Math.sin(phi) * Math.sin(theta),
   );
+}
+
+/** A hollow ring sprite — the Moon's marker, distinct from filled dots. */
+function makeRingSprite(color: string): THREE.Sprite {
+  const size = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const rgb = new THREE.Color(color);
+  const center = size / 2;
+  const glow = ctx.createRadialGradient(
+    center,
+    center,
+    0,
+    center,
+    center,
+    center,
+  );
+  glow.addColorStop(
+    0,
+    `rgba(${Math.round(rgb.r * 255)}, ${Math.round(rgb.g * 255)}, ${Math.round(rgb.b * 255)}, 0.25)`,
+  );
+  glow.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, size, size);
+  ctx.beginPath();
+  ctx.arc(center, center, 14, 0, Math.PI * 2);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3.5;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 10;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  const texture = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+    }),
+  );
+  return sprite;
 }
 
 /** Radial-gradient glow sprite (a soft billboard dot). */
@@ -173,6 +219,7 @@ interface GlobeView {
   earthGroup: THREE.Group;
   updateSatellites: (tles: TleEntry[]) => void;
   updateObserver: (lat: number, lon: number) => void;
+  updateMoon: (track: MoonTrack) => void;
   setSelected: (id: string | null) => void;
   dispose: () => void;
 }
@@ -265,6 +312,12 @@ function createGlobeView(
   let observer: LatLon = { lat: 0, lon: 0 };
   let selectedId: string | null = null;
   let youGlow: THREE.Sprite | null = null;
+  // Moon overlay (marker + past/future ground track).
+  let moonMarker: THREE.Sprite | null = null;
+  let moonPastLine: THREE.Line | null = null;
+  let moonFutureLine: THREE.Line | null = null;
+  // Camera follow: offset between camera and target, re-captured on select.
+  let followOffset: THREE.Vector3 | null = null;
 
   const updateSatellites = (tles: TleEntry[]) => {
     for (const sat of sats.values()) {
@@ -300,9 +353,75 @@ function createGlobeView(
     earthGroup.add(youGlow);
   };
 
+  const updateMoon = (track: MoonTrack) => {
+    for (const object of [moonMarker, moonPastLine, moonFutureLine]) {
+      if (!object) {
+        continue;
+      }
+      earthGroup.remove(object);
+      object.geometry?.dispose();
+      (object.material as THREE.Material).dispose();
+      if (object instanceof THREE.Sprite) {
+        (object.material as THREE.SpriteMaterial).map?.dispose();
+      }
+    }
+    moonMarker = null;
+    moonPastLine = null;
+    moonFutureLine = null;
+
+    // Marker at the current sub-point, just above the surface.
+    moonMarker = makeRingSprite(MOON_COLOR);
+    moonMarker.scale.set(0.11, 0.11, 1);
+    moonMarker.position.copy(
+      latLonAltToVector3(track.now.lat, track.now.lon, TRACK_LIFT_KM),
+    );
+    earthGroup.add(moonMarker);
+
+    // Ground track: past dim, future bright, split at the current moment.
+    const positions = new Float32Array(track.track.length * 3);
+    track.track.forEach((point, i) => {
+      const v = latLonAltToVector3(point.lat, point.lon, TRACK_LIFT_KM);
+      positions[i * 3] = v.x;
+      positions[i * 3 + 1] = v.y;
+      positions[i * 3 + 2] = v.z;
+    });
+    const makeLine = (opacity: number) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(positions, 3),
+      );
+      return new THREE.Line(
+        geometry,
+        new THREE.LineBasicMaterial({
+          color: MOON_COLOR,
+          transparent: true,
+          opacity,
+        }),
+      );
+    };
+    const splitIndex = track.track.findIndex(
+      (point) => point.time > track.now.time,
+    );
+    const split = splitIndex === -1 ? track.track.length : splitIndex;
+    moonPastLine = makeLine(0.2);
+    moonPastLine.geometry.setDrawRange(0, split);
+    moonFutureLine = makeLine(0.55);
+    moonFutureLine.geometry.setDrawRange(split, track.track.length - split);
+    earthGroup.add(moonPastLine, moonFutureLine);
+  };
+
   const setSelected = (id: string | null) => {
     selectedId = id;
+    // Re-capture the camera offset so the swing starts from wherever the
+    // user is currently looking (deselecting leaves the camera in place).
+    followOffset = null;
   };
+
+  // User interaction (drag/zoom) hands control back — stop auto-following.
+  controls.addEventListener("start", () => {
+    followOffset = null;
+  });
 
   // Click-to-select: a press that doesn't move much is a tap on a satellite.
   const raycaster = new THREE.Raycaster();
@@ -412,6 +531,24 @@ function createGlobeView(
       sat.futureGeometry.setDrawRange(k, sat.times.length - k);
     }
 
+    // Keep the selected satellite centered as it orbits: ease the camera's
+    // target toward its live world position while preserving the current
+    // viewing distance and direction. The satellite orbits in inertial space
+    // while the earth spins beneath it, so this genuinely tracks it.
+    if (selectedId !== null) {
+      const selected = sats.get(selectedId);
+      if (selected) {
+        const worldPos = selected.core.position
+          .clone()
+          .applyMatrix4(earthGroup.matrixWorld);
+        if (followOffset === null) {
+          followOffset = camera.position.clone().sub(controls.target);
+        }
+        controls.target.lerp(worldPos, 0.09);
+        camera.position.copy(controls.target).add(followOffset);
+      }
+    }
+
     // Push live numbers to the HUD at a throttled rate (React state at 60fps
     // would be wasteful — the canvas already animates at full speed).
     if (nowMs - lastTelemetryAt >= TELEMETRY_INTERVAL_MS) {
@@ -487,6 +624,7 @@ function createGlobeView(
     earthGroup,
     updateSatellites,
     updateObserver,
+    updateMoon,
     setSelected,
     dispose,
   };
@@ -566,6 +704,30 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
       clearInterval(timer);
     };
   }, [idsKey]);
+
+  // Load the Moon's sub-point + ground track; refresh every minute (the moon
+  // moves only ~15°/hour, so this cadence is plenty for a smooth overlay).
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/sky/moon");
+        const body = await response.json();
+        if (cancelled || !body?.data) {
+          return;
+        }
+        viewRef.current?.updateMoon(body.data as MoonTrack);
+      } catch {
+        // The moon overlay is decorative — fail silently.
+      }
+    };
+    load();
+    const timer = setInterval(load, TRACK_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
 
   // Push TLE + observer updates into the scene whenever they change.
   useEffect(() => {
@@ -648,12 +810,13 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
             <span className="text-slate-300">
               {formatCoordinates(lat, lon)}
             </span>
-            : past 30 min (dim), next 90 min (bright).
+            : past 30 min (dim), next 90 min (bright). The white ring marks the
+            Moon&apos;s sub-point.
           </p>
           <p className="pt-1 text-[11px] leading-relaxed text-slate-600">
-            Click a satellite (or its name in the list) to track it live · drag
-            to orbit · scroll to zoom · TLEs from CelesTrak, refreshed every
-            minute
+            Click a satellite (or its name in the list) to track it live — the
+            camera swings to follow it as it orbits · drag to orbit · scroll to
+            zoom · refreshed every minute
           </p>
         </div>
       </div>

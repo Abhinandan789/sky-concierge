@@ -128,7 +128,10 @@ export default async function HomePage({
         <h2 className="mb-6 text-center text-2xl font-bold text-slate-100">
           Let the sky come to you
         </h2>
-        <SubscribeSection location={location} />
+        <SubscribeSection
+          location={location}
+          initialSatelliteIds={selectedSatelliteIds}
+        />
         <PushNotifications location={location} />
       </section>
 

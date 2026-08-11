@@ -7,6 +7,7 @@ import {
 } from "@/lib/db";
 import { formatTime } from "@/lib/utils";
 import type { IssPass, SkyBrief } from "@/types";
+import * as briefModule from "@/services/sky/brief";
 import { sendPush } from "./push";
 import {
   candidatesFromBrief,
@@ -199,6 +200,19 @@ describe("candidatesFromBrief", () => {
       NOW,
     );
     expect(candidates).toHaveLength(0);
+  });
+
+  it("alerts for the subscriber's chosen satellite, using its name", () => {
+    const candidates = candidatesFromBrief(
+      { ...SUBSCRIPTION, satelliteIds: "48274" },
+      makeBrief({
+        issPasses: [{ ...makePass(30), satelliteName: "CSS (TIANHE)" }],
+      }),
+      NOW,
+    );
+    expect(candidates.find((c) => c.eventType === "iss")?.message.subject).toBe(
+      "CSS (TIANHE) pass in ~30 min over your location",
+    );
   });
 });
 
@@ -444,6 +458,71 @@ describe("runAlertCheck", () => {
       .all() as { eventType: string }[];
     expect(logs).toHaveLength(1);
     expect(logs[0].eventType).toBe("showers");
+  });
+
+  it("evaluates the subscriber's own satellite selection, not just the server set", async () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "multi@example.com",
+      lat: 40.71,
+      lon: -74.01,
+      events: "iss",
+      satelliteIds: "48274,25544",
+    });
+
+    const spy = vi
+      .spyOn(briefModule, "buildTonightBrief")
+      .mockResolvedValue(
+        makeBrief({
+          issPasses: [{ ...makePass(30), satelliteName: "CSS (TIANHE)" }],
+        }),
+      );
+    try {
+      const sender = { send: vi.fn(async () => undefined) };
+      const result = await runAlertCheck({
+        db,
+        sender,
+        now: NOW,
+        fetcher: offlineFetcher,
+      });
+      expect(result.sent).toBe(1);
+      const options = spy.mock.calls[0][1] as briefModule.BuildBriefOptions;
+      expect(options.noradIds).toEqual(["48274", "25544"]);
+      expect(sender.send).toHaveBeenCalledWith(
+        "multi@example.com",
+        expect.objectContaining({
+          subject: expect.stringContaining("CSS (TIANHE)"),
+        }),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("falls back to the server-configured set when no satellites are stored", async () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "default@example.com",
+      lat: 40.71,
+      lon: -74.01,
+      events: "iss",
+    });
+
+    const spy = vi
+      .spyOn(briefModule, "buildTonightBrief")
+      .mockResolvedValue(makeBrief({}));
+    try {
+      await runAlertCheck({
+        db,
+        sender: { send: vi.fn(async () => undefined) },
+        now: NOW,
+        fetcher: offlineFetcher,
+      });
+      const options = spy.mock.calls[0][1] as briefModule.BuildBriefOptions;
+      expect(options.noradIds).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("appends an unsubscribe link to every emailed alert", async () => {

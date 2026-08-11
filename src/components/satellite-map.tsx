@@ -14,6 +14,7 @@ import {
   type GroundTrackPoint,
 } from "@/lib/satellite-map";
 import type { LatLon } from "@/types";
+import type { MoonTrack, MoonTrackPoint } from "@/services/sky/moon-track";
 
 interface TleEntry {
   noradId: string;
@@ -29,6 +30,8 @@ interface SatelliteMapProps {
 }
 
 const COLORS = ["#22d3ee", "#fbbf24", "#e879f9", "#34d399"];
+/** Moon overlay color — neutral white, distinct from the satellite dots. */
+const MOON_COLOR = "#f1f5f9";
 const LOGICAL_SIZE = 480;
 const PAD = 36;
 const TRACK_REFRESH_MS = 60_000;
@@ -39,12 +42,13 @@ function drawRadar(
     location: LatLon;
     tles: TleEntry[];
     tracks: Map<string, GroundTrackPoint[]>;
+    moon: MoonTrack | null;
     now: Date;
     /** Average cloud cover tonight (0-100), used to haze the disc. */
     cloudAverage: number | null;
   },
 ) {
-  const { location, tles, tracks, now, cloudAverage } = options;
+  const { location, tles, tracks, moon, now, cloudAverage } = options;
   const dpr = window.devicePixelRatio || 1;
   const size = LOGICAL_SIZE;
   if (canvas.width !== size * dpr) {
@@ -119,6 +123,61 @@ function drawRadar(
   ctx.fillText("W", center - inner - 15, center);
 
   const nowMs = now.getTime();
+
+  // Moon sub-point + ground track (drawn under the satellites so the sat
+  // blips stay prominent). The Moon is at 384,000 km — what matters here is
+  // where it is directly overhead and which way that point is sweeping.
+  if (moon) {
+    const drawMoonTrack = (points: MoonTrackPoint[], alpha: number) => {
+      if (points.length === 0) {
+        return;
+      }
+      ctx.beginPath();
+      let started = false;
+      for (const point of points) {
+        const { eastKm, northKm } = toLocalKm(point.lat, point.lon, location);
+        const { x, y } = toCanvas(eastKm, northKm);
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = MOON_COLOR;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    };
+    const moonPast = moon.track.filter((point) => point.time <= nowMs);
+    const moonFuture = moon.track.filter((point) => point.time > nowMs);
+    // Pin both line ends to the live sub-point so they meet the marker.
+    const current = { ...moon.now, time: nowMs };
+    drawMoonTrack([...moonPast, current], 0.2);
+    drawMoonTrack([current, ...moonFuture], 0.55);
+
+    const { eastKm, northKm } = toLocalKm(moon.now.lat, moon.now.lon, location);
+    const { x, y } = toCanvas(eastKm, northKm);
+    // Ring marker — a hollow circle so it reads as "the Moon", not a satellite.
+    ctx.beginPath();
+    ctx.arc(x, y, 6, 0, Math.PI * 2);
+    ctx.strokeStyle = MOON_COLOR;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = MOON_COLOR;
+    ctx.shadowBlur = 8;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.arc(x, y, 2, 0, Math.PI * 2);
+    ctx.fillStyle = MOON_COLOR;
+    ctx.fill();
+    ctx.fillStyle = MOON_COLOR;
+    ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText("Moon", x + 11, y - 4);
+  }
 
   // Satellite tracks + blips
   tles.forEach((tle, index) => {
@@ -237,6 +296,8 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
   const [cloudLevel, setCloudLevel] = useState<string | null>(null);
   const [cloudAverage, setCloudAverage] = useState<number | null>(null);
   const cloudAverageRef = useRef<number | null>(null);
+  const [moon, setMoon] = useState<MoonTrack | null>(null);
+  const moonRef = useRef<MoonTrack | null>(null);
   const idsKey = selectedIds.join(",");
   const { lat, lon } = location;
 
@@ -313,6 +374,30 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
     };
   }, [lat, lon]);
 
+  // Moon sub-point + track; refresh every minute (it moves only ~15°/hour).
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/sky/moon");
+        const body = await response.json();
+        if (cancelled || !body?.data) {
+          return;
+        }
+        moonRef.current = body.data as MoonTrack;
+        setMoon(body.data as MoonTrack);
+      } catch {
+        // The moon overlay is decorative — fail silently.
+      }
+    };
+    load();
+    const timer = setInterval(load, TRACK_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
   // Animate at 60fps using the latest data (refs avoid re-running the loop).
   useEffect(() => {
     let frame = 0;
@@ -323,6 +408,7 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
           location: { lat, lon },
           tles: tlesRef.current,
           tracks: tracksRef.current,
+          moon: moonRef.current,
           now: new Date(),
           cloudAverage: cloudAverageRef.current,
         });
@@ -424,6 +510,15 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
                 </span>
               </li>
             ))}
+            {moon && (
+              <li className="flex items-center gap-2.5">
+                <span className="inline-block size-2.5 rounded-full border-2 border-slate-200" />
+                <span className="text-sm text-slate-200">Moon</span>
+                <span className="mono ml-auto text-[10px] text-slate-500">
+                  sub-point
+                </span>
+              </li>
+            )}
           </ul>
           <p className="pt-1 text-[11px] text-slate-600">
             TLEs from CelesTrak · refreshed every minute

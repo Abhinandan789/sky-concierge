@@ -17,6 +17,11 @@ export interface AlertSubscriptionRow {
   /** Events requested by an unverified re-submit of a verified row; applied
    * only after the owner confirms (NULL = no pending change). */
   pendingEvents: string | null;
+  /** Comma-separated NORAD ids tracked for this subscription (NULL = the
+   * server-configured set). */
+  satelliteIds: string | null;
+  /** NORAD ids requested by an unverified re-submit of a verified row. */
+  pendingSatelliteIds: string | null;
   createdAt: string;
 }
 
@@ -43,13 +48,15 @@ export interface PushSubscriptionRow {
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS alert_subscriptions (
-  id             TEXT PRIMARY KEY,
-  email          TEXT NOT NULL,
-  lat            REAL NOT NULL,
-  lon            REAL NOT NULL,
-  events         TEXT NOT NULL DEFAULT 'iss,aurora,showers',
-  enabled        INTEGER NOT NULL DEFAULT 1,
-  created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  id                    TEXT PRIMARY KEY,
+  email                 TEXT NOT NULL,
+  lat                   REAL NOT NULL,
+  lon                   REAL NOT NULL,
+  events                TEXT NOT NULL DEFAULT 'iss,aurora,showers',
+  satellite_ids         TEXT,
+  pending_satellite_ids TEXT,
+  enabled               INTEGER NOT NULL DEFAULT 1,
+  created_at            TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(email, lat, lon)
 );
 
@@ -144,6 +151,18 @@ export function createSkyDb(path: string): DatabaseSync {
     "pending_events",
     "pending_events TEXT",
   );
+  ensureColumn(
+    db,
+    "alert_subscriptions",
+    "satellite_ids",
+    "satellite_ids TEXT",
+  );
+  ensureColumn(
+    db,
+    "alert_subscriptions",
+    "pending_satellite_ids",
+    "pending_satellite_ids TEXT",
+  );
 
   // Existing subscribers predate double opt-in; treat them as verified and
   // give them unsubscribe tokens so links work immediately.
@@ -179,6 +198,8 @@ export interface UpsertSubscriptionInput {
   lat: number;
   lon: number;
   events: string;
+  /** Comma-separated NORAD ids; empty/undefined = the server-configured set. */
+  satelliteIds?: string;
   /**
    * Whether the subscription skips email confirmation. Defaults to true (the
    * console/dev path); the API passes false when it will send a real
@@ -213,15 +234,16 @@ export function upsertSubscription(
   input: UpsertSubscriptionInput,
 ): UpsertSubscriptionResult {
   const { email, lat, lon, events } = input;
+  const satelliteIds = input.satelliteIds?.trim() || null;
   const verified = input.verified ?? true;
   const verifyToken = newToken();
   const unsubscribeToken = newToken();
 
   db.prepare(
     `INSERT INTO alert_subscriptions
-       (id, email, lat, lon, events, enabled, verified, verify_token,
-        unsubscribe_token, pending_events)
-     VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, NULL)
+       (id, email, lat, lon, events, satellite_ids, enabled, verified,
+        verify_token, unsubscribe_token, pending_events, pending_satellite_ids)
+     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, NULL)
      ON CONFLICT(email, lat, lon) DO UPDATE SET
        verified = MAX(alert_subscriptions.verified, excluded.verified),
        verify_token = excluded.verify_token,
@@ -238,18 +260,30 @@ export function upsertSubscription(
            THEN excluded.events
            ELSE alert_subscriptions.events
        END,
+       satellite_ids = CASE
+         WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0
+           THEN excluded.satellite_ids
+           ELSE alert_subscriptions.satellite_ids
+       END,
        enabled = CASE
          WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0
            THEN 1
            ELSE alert_subscriptions.enabled
        END,
        -- Park changes to a verified row until the owner confirms: different
-       -- events, or a re-enable request against an opted-out subscription.
+       -- events, different satellites, or a re-enable request against an
+       -- opted-out subscription. NULL vs NULL never parks (IS NOT is false).
        pending_events = CASE
          WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0 THEN NULL
          WHEN excluded.events != alert_subscriptions.events THEN excluded.events
          WHEN alert_subscriptions.enabled = 0 THEN alert_subscriptions.events
          ELSE alert_subscriptions.pending_events
+       END,
+       pending_satellite_ids = CASE
+         WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0 THEN NULL
+         WHEN excluded.satellite_ids IS NOT alert_subscriptions.satellite_ids
+           THEN excluded.satellite_ids
+         ELSE alert_subscriptions.pending_satellite_ids
        END`,
   ).run(
     randomUUID(),
@@ -257,6 +291,7 @@ export function upsertSubscription(
     lat,
     lon,
     events,
+    satelliteIds,
     verified ? 1 : 0,
     verifyToken,
     unsubscribeToken,
@@ -264,7 +299,8 @@ export function upsertSubscription(
 
   const row = db
     .prepare(
-      `SELECT id, verified, verify_token, unsubscribe_token, pending_events
+      `SELECT id, verified, verify_token, unsubscribe_token, pending_events,
+              pending_satellite_ids
        FROM alert_subscriptions WHERE email = ? AND lat = ? AND lon = ?`,
     )
     .get(email, lat, lon) as
@@ -274,6 +310,7 @@ export function upsertSubscription(
         verify_token: string;
         unsubscribe_token: string;
         pending_events: string | null;
+        pending_satellite_ids: string | null;
       }
     | undefined;
 
@@ -285,7 +322,8 @@ export function upsertSubscription(
     verified: row.verified === 1,
     verifyToken: row.verify_token,
     unsubscribeToken: row.unsubscribe_token,
-    pendingChange: row.pending_events !== null,
+    pendingChange:
+      row.pending_events !== null || row.pending_satellite_ids !== null,
   };
 }
 
@@ -297,6 +335,8 @@ export function listEnabledSubscriptions(
     .prepare(
       `SELECT id, email, lat, lon, events, enabled, verified,
               verify_token AS verifyToken, unsubscribe_token AS unsubscribeToken,
+              satellite_ids AS satelliteIds,
+              pending_satellite_ids AS pendingSatelliteIds,
               created_at AS createdAt
        FROM alert_subscriptions
        WHERE enabled = 1 AND verified = 1`,
@@ -325,8 +365,10 @@ export function verifySubscription(db: DatabaseSync, token: string): boolean {
       `UPDATE alert_subscriptions
        SET verified = 1,
            events = COALESCE(pending_events, events),
+           satellite_ids = COALESCE(pending_satellite_ids, satellite_ids),
            enabled = 1,
-           pending_events = NULL
+           pending_events = NULL,
+           pending_satellite_ids = NULL
        WHERE verify_token = ?`,
     )
     .run(token);

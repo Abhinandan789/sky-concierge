@@ -5,6 +5,7 @@ import { clientIp, RateLimiter } from "@/lib/rate-limit";
 import { getDb, upsertSubscription } from "@/lib/db";
 import { isEmail, parseNumber, validateLatLon } from "@/lib/utils";
 import { siteUrl } from "@/config/site";
+import { parseSatelliteIds } from "@/config/satellites";
 import { createSender } from "@/services/alerts/sender";
 import { ALERT_EVENT_TYPES, type AlertEventType } from "@/types";
 
@@ -20,6 +21,8 @@ interface SubscriptionBody {
   lat?: unknown;
   lon?: unknown;
   events?: unknown;
+  /** NORAD catalog ids to alert about (array of numbers/strings, up to 4). */
+  satelliteIds?: unknown;
 }
 
 function parseCoordinates(body: SubscriptionBody): {
@@ -86,6 +89,23 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Optional satellite selection (array of NORAD ids). Empty = server set.
+  let satelliteIds: string | undefined;
+  if (body.satelliteIds !== undefined) {
+    const raw = Array.isArray(body.satelliteIds)
+      ? body.satelliteIds.map(String).join(",")
+      : String(body.satelliteIds);
+    const parsed = parseSatelliteIds(raw);
+    if (!parsed.valid) {
+      return jsonError(
+        "Invalid satellite selection — expected up to 4 numeric NORAD catalog ids.",
+        400,
+        "INVALID_SATELLITE_IDS",
+      );
+    }
+    satelliteIds = parsed.ids.join(",");
+  }
+
   // With a real email sender configured we require double opt-in; without
   // one (console/dev mode) the subscription is active immediately.
   const needsVerification = Boolean(process.env.RESEND_API_KEY);
@@ -96,6 +116,7 @@ export async function POST(request: NextRequest) {
       lat,
       lon,
       events: events.join(","),
+      satelliteIds,
       verified: !needsVerification,
     });
 
