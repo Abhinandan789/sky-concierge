@@ -21,7 +21,7 @@ export function phaseName(phase: number): string {
 const DARK_SAMPLE_MINUTES = 30;
 const MIN_DARK_WINDOW_MINUTES = 30;
 
-interface DarkWindow {
+export interface DarkWindow {
   start: Date;
   end: Date;
 }
@@ -31,7 +31,7 @@ interface DarkWindow {
  * contiguous below-horizon periods into dark windows. Accurate to one step
  * and immune to the rise/set edge cases that plague calendar math.
  */
-function findDarkWindows(
+export function findDarkWindows(
   location: LatLon,
   nightStart: Date,
   nightEnd: Date,
@@ -67,6 +67,11 @@ function findDarkWindows(
   return windows;
 }
 
+export interface NightBounds {
+  start: Date;
+  end: Date;
+}
+
 /**
  * Find the astronomical-darkness window for "tonight" — the night we are
  * currently inside, or the one approaching next.
@@ -81,10 +86,10 @@ function findDarkWindows(
  *      (via calendar arithmetic, so DST-transition days stay correct);
  *   3. tonight = [thatDay.night, nextDay.nightEnd].
  */
-function getTonightBounds(
+export function getTonightBounds(
   location: LatLon,
   now: Date,
-): { start: Date; end: Date } | null {
+): NightBounds | null {
   const startOfLocalDay = (date: Date) =>
     new Date(date.getFullYear(), date.getMonth(), date.getDate());
 
@@ -152,8 +157,7 @@ export function computeMoonInfo(location: LatLon, now: Date): MoonInfo {
       duration < MIN_DARK_WINDOW_MINUTES * 60_000 ||
       (bestViewingWindow !== null &&
         duration <=
-          bestViewingWindow.end.getTime() -
-            bestViewingWindow.start.getTime())
+          bestViewingWindow.end.getTime() - bestViewingWindow.start.getTime())
     ) {
       continue;
     }

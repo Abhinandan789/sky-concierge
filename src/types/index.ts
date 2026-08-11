@@ -13,6 +13,8 @@ export interface IssPass {
   /** Compass azimuth (0-360, true north) at the moment of max elevation. */
   maxAzimuthDeg: number;
   durationMinutes: number;
+  /** Satellite name from the TLE, e.g. "ISS (ZARYA)". Set by the brief builder. */
+  satelliteName?: string;
 }
 
 export type AuroraLevel = "LOW" | "MODERATE" | "HIGH" | "STORM";
@@ -57,8 +59,51 @@ export interface MoonInfo {
   darkHours: number;
 }
 
+export type CloudLevel = "CLEAR" | "PARTLY_CLOUDY" | "CLOUDY" | "UNKNOWN";
+
+export interface CloudHour {
+  /** Hour boundary. */
+  time: Date;
+  /** Cloud cover, 0-100%. */
+  cloudCover: number;
+}
+
+export interface CloudSummary {
+  level: CloudLevel;
+  /** Average cloud cover over tonight's dark window, 0-100, or null. */
+  average: number | null;
+  /** Hourly cloud cover during tonight's window (for the timeline). */
+  hours: CloudHour[];
+}
+
+export interface PlanetEvent {
+  name: string;
+  /** Visual magnitude at best viewing time (lower = brighter). */
+  magnitude: number | null;
+  /** Highest altitude above the horizon tonight, degrees. */
+  maxAltitudeDeg: number;
+  /** When it first appears above the horizon tonight (null = already up at dusk). */
+  riseTime: Date | null;
+  /** When it dips below the horizon (null = stays up past dawn). */
+  setTime: Date | null;
+  /** Best time to look — moment of maximum altitude. */
+  bestTime: Date | null;
+  /** Compass direction (e.g. "SW") at best viewing time. */
+  direction: string;
+  /** True when the planet is above the horizon at some point tonight. */
+  visible: boolean;
+}
+
+export interface ConjunctionEvent {
+  planet: string;
+  /** Moment of closest approach tonight. */
+  time: Date;
+  /** Angular separation between the Moon and the planet, degrees. */
+  separationDeg: number;
+}
+
 export interface SkyBriefError {
-  section: "iss" | "aurora" | "showers";
+  section: "iss" | "aurora" | "showers" | "clouds" | "planets";
   message: string;
 }
 
@@ -69,6 +114,9 @@ export interface SkyBrief {
   aurora: AuroraInfo | null;
   showers: ShowerInfo[];
   moon: MoonInfo;
+  clouds: CloudSummary;
+  planets: PlanetEvent[];
+  conjunctions: ConjunctionEvent[];
   errors: SkyBriefError[];
 }
 

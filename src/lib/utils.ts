@@ -1,4 +1,5 @@
 import { clsx, type ClassValue } from "clsx";
+import tzLookup from "tz-lookup";
 import { twMerge } from "tailwind-merge";
 
 export function cn(...inputs: ClassValue[]) {
@@ -10,20 +11,35 @@ export interface LatLon {
   lon: number;
 }
 
-/** Format a Date as local HH:MM. */
-export function formatTime(date: Date) {
+/**
+ * IANA timezone for a coordinate pair (e.g. "America/New_York"). Falls back
+ * to UTC for ocean/edge cases where the lookup returns nothing.
+ */
+export function timeZoneFor(lat: number, lon: number): string {
+  try {
+    const zone = tzLookup(lat, lon);
+    return typeof zone === "string" && zone.length > 0 ? zone : "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+/** Format a Date as HH:MM in the given timezone (server-local when omitted). */
+export function formatTime(date: Date, timeZone?: string) {
   return date.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
+    ...(timeZone ? { timeZone } : {}),
   });
 }
 
-/** Format a Date as local weekday + HH:MM. */
-export function formatDayTime(date: Date) {
+/** Format a Date as weekday + HH:MM in the given timezone. */
+export function formatDayTime(date: Date, timeZone?: string) {
   return date.toLocaleString([], {
     weekday: "short",
     hour: "2-digit",
     minute: "2-digit",
+    ...(timeZone ? { timeZone } : {}),
   });
 }
 
