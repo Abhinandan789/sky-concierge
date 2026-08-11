@@ -1,10 +1,25 @@
 "use client";
 
-import { Bell, CheckCircle2, Loader2, Mail } from "lucide-react";
+import {
+  Bell,
+  CheckCircle2,
+  Loader2,
+  Mail,
+  Plus,
+  Satellite,
+  X,
+} from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import {
+  KNOWN_SATELLITES,
+  MAX_TRACKED_SATELLITES,
+  satelliteLabel,
+} from "@/config/satellites";
 import { formatCoordinates } from "@/lib/utils";
 import type { LatLon } from "@/types";
+
+const NORAD_ID_PATTERN = /^\d{1,8}$/;
 
 const EVENT_OPTIONS = [
   {
@@ -24,12 +39,54 @@ const EVENT_OPTIONS = [
   },
 ] as const;
 
-export function SubscribeSection({ location }: { location: LatLon }) {
+export function SubscribeSection({
+  location,
+  initialSatelliteIds = [],
+}: {
+  location: LatLon;
+  /** NORAD ids chosen in the tracker picker (?sat=…) — carried into alerts. */
+  initialSatelliteIds?: string[];
+}) {
   const [email, setEmail] = useState("");
   const [events, setEvents] = useState<string[]>(["iss", "aurora", "showers"]);
+  const [satelliteIds, setSatelliteIds] =
+    useState<string[]>(initialSatelliteIds);
+  const [customSatelliteId, setCustomSatelliteId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [subscribed, setSubscribed] = useState(false);
   const [pendingVerification, setPendingVerification] = useState(false);
+
+  const customIds = satelliteIds.filter(
+    (id) => !KNOWN_SATELLITES.some((satellite) => satellite.noradId === id),
+  );
+
+  const toggleSatellite = (noradId: string) => {
+    setSatelliteIds((previous) =>
+      previous.includes(noradId)
+        ? previous.filter((id) => id !== noradId)
+        : [...previous, noradId],
+    );
+  };
+
+  const addSatellite = () => {
+    const id = customSatelliteId.trim();
+    if (!NORAD_ID_PATTERN.test(id)) {
+      toast.error("Enter a numeric NORAD catalog id (e.g. 25544).");
+      return;
+    }
+    if (satelliteIds.includes(id)) {
+      toast.info(`${satelliteLabel(id)} is already selected.`);
+      return;
+    }
+    if (satelliteIds.length >= MAX_TRACKED_SATELLITES) {
+      toast.error(
+        `Up to ${MAX_TRACKED_SATELLITES} satellites at once — remove one first.`,
+      );
+      return;
+    }
+    setCustomSatelliteId("");
+    setSatelliteIds((previous) => [...previous, id]);
+  };
 
   const toggle = (id: string) => {
     setEvents((previous) =>
@@ -61,6 +118,7 @@ export function SubscribeSection({ location }: { location: LatLon }) {
           lat: location.lat,
           lon: location.lon,
           events,
+          satelliteIds: satelliteIds.length > 0 ? satelliteIds : undefined,
         }),
       });
       const body = await response.json();
@@ -159,6 +217,77 @@ export function SubscribeSection({ location }: { location: LatLon }) {
               className="w-full rounded-xl border border-white/10 bg-white/5 py-3 pr-4 pl-10 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400/60 focus:ring-2 focus:ring-cyan-400/20 focus:outline-none"
             />
           </div>
+        </div>
+
+        <div>
+          <span className="mb-2 flex items-center gap-1.5 text-xs font-medium tracking-wide text-slate-400 uppercase">
+            <Satellite className="size-3.5" />
+            Satellites to alert about
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {KNOWN_SATELLITES.map((satellite) => {
+              const active = satelliteIds.includes(satellite.noradId);
+              return (
+                <button
+                  key={satellite.noradId}
+                  type="button"
+                  onClick={() => toggleSatellite(satellite.noradId)}
+                  aria-pressed={active}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                    active
+                      ? "border-cyan-400/50 bg-cyan-400/10 text-cyan-200"
+                      : "border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/25"
+                  }`}
+                >
+                  {satellite.name}
+                </button>
+              );
+            })}
+            {customIds.map((noradId) => (
+              <span
+                key={noradId}
+                className="inline-flex items-center gap-1 rounded-full border border-indigo-400/40 bg-indigo-400/10 px-3 py-1 text-xs font-medium text-indigo-200"
+              >
+                {satelliteLabel(noradId)}
+                <button
+                  type="button"
+                  onClick={() => toggleSatellite(noradId)}
+                  aria-label={`Remove ${satelliteLabel(noradId)}`}
+                  className="text-indigo-300/70 transition hover:text-indigo-100"
+                >
+                  <X className="size-3" />
+                </button>
+              </span>
+            ))}
+            <div className="ml-auto flex items-center gap-1.5">
+              <input
+                type="text"
+                value={customSatelliteId}
+                onChange={(event) => setCustomSatelliteId(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addSatellite();
+                  }
+                }}
+                placeholder="NORAD id…"
+                aria-label="Add satellite by NORAD catalog id"
+                className="w-28 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200 placeholder:text-slate-500 focus:border-cyan-400/60 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={addSatellite}
+                className="inline-flex items-center gap-1 rounded-full border border-cyan-400/40 bg-cyan-400/10 px-2.5 py-1 text-xs font-medium text-cyan-200 transition hover:border-cyan-300/70 hover:bg-cyan-400/20"
+              >
+                <Plus className="size-3" />
+                Add
+              </button>
+            </div>
+          </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+            Your selection from the tracker above carries over — leave it empty
+            to use the server&apos;s default set.
+          </p>
         </div>
 
         <div>

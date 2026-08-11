@@ -14,6 +14,7 @@ import {
   type GroundTrackPoint,
 } from "@/lib/satellite-map";
 import type { LatLon } from "@/types";
+import type { MoonTrack, MoonTrackPoint } from "@/services/sky/moon-track";
 
 interface TleEntry {
   noradId: string;
@@ -26,9 +27,14 @@ interface SatelliteMapProps {
   location: LatLon;
   /** NORAD ids selected in the picker; empty = server-configured set. */
   selectedIds: string[];
+  /** Satellite currently focused — shared with the 3D globe view. */
+  focusedId: string | null;
+  onFocusChange: (id: string | null) => void;
 }
 
 const COLORS = ["#22d3ee", "#fbbf24", "#e879f9", "#34d399"];
+/** Moon overlay color — neutral white, distinct from the satellite dots. */
+const MOON_COLOR = "#f1f5f9";
 const LOGICAL_SIZE = 480;
 const PAD = 36;
 const TRACK_REFRESH_MS = 60_000;
@@ -39,12 +45,16 @@ function drawRadar(
     location: LatLon;
     tles: TleEntry[];
     tracks: Map<string, GroundTrackPoint[]>;
+    moon: MoonTrack | null;
     now: Date;
     /** Average cloud cover tonight (0-100), used to haze the disc. */
     cloudAverage: number | null;
+    /** Satellite to highlight — shared with the 3D globe view. */
+    focusedId: string | null;
   },
 ) {
-  const { location, tles, tracks, now, cloudAverage } = options;
+  const { location, tles, tracks, moon, now, cloudAverage, focusedId } =
+    options;
   const dpr = window.devicePixelRatio || 1;
   const size = LOGICAL_SIZE;
   if (canvas.width !== size * dpr) {
@@ -120,6 +130,61 @@ function drawRadar(
 
   const nowMs = now.getTime();
 
+  // Moon sub-point + ground track (drawn under the satellites so the sat
+  // blips stay prominent). The Moon is at 384,000 km — what matters here is
+  // where it is directly overhead and which way that point is sweeping.
+  if (moon) {
+    const drawMoonTrack = (points: MoonTrackPoint[], alpha: number) => {
+      if (points.length === 0) {
+        return;
+      }
+      ctx.beginPath();
+      let started = false;
+      for (const point of points) {
+        const { eastKm, northKm } = toLocalKm(point.lat, point.lon, location);
+        const { x, y } = toCanvas(eastKm, northKm);
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = MOON_COLOR;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    };
+    const moonPast = moon.track.filter((point) => point.time <= nowMs);
+    const moonFuture = moon.track.filter((point) => point.time > nowMs);
+    // Pin both line ends to the live sub-point so they meet the marker.
+    const current = { ...moon.now, time: nowMs };
+    drawMoonTrack([...moonPast, current], 0.2);
+    drawMoonTrack([current, ...moonFuture], 0.55);
+
+    const { eastKm, northKm } = toLocalKm(moon.now.lat, moon.now.lon, location);
+    const { x, y } = toCanvas(eastKm, northKm);
+    // Ring marker — a hollow circle so it reads as "the Moon", not a satellite.
+    ctx.beginPath();
+    ctx.arc(x, y, 6, 0, Math.PI * 2);
+    ctx.strokeStyle = MOON_COLOR;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = MOON_COLOR;
+    ctx.shadowBlur = 8;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.arc(x, y, 2, 0, Math.PI * 2);
+    ctx.fillStyle = MOON_COLOR;
+    ctx.fill();
+    ctx.fillStyle = MOON_COLOR;
+    ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText("Moon", x + 11, y - 4);
+  }
+
   // Satellite tracks + blips
   tles.forEach((tle, index) => {
     const color = COLORS[index % COLORS.length];
@@ -179,6 +244,21 @@ function drawRadar(
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.fillText(tle.name, x + 11, y - 4);
+
+    // Focus ring — a white outer circle around the satellite shared with the
+    // globe (click it in either view to lock on).
+    if (tle.noradId === focusedId) {
+      ctx.beginPath();
+      ctx.arc(x, y, 15, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, y, 9, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
   });
 
   // Observer at the center
@@ -225,7 +305,12 @@ function drawRadar(
  * brief and are propagated client-side, so the map animates without any
  * network traffic.
  */
-export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
+export function SatelliteMap({
+  location,
+  selectedIds,
+  focusedId,
+  onFocusChange,
+}: SatelliteMapProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const tlesRef = useRef<TleEntry[]>([]);
   const tracksRef = useRef<Map<string, GroundTrackPoint[]>>(new Map());
@@ -237,6 +322,8 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
   const [cloudLevel, setCloudLevel] = useState<string | null>(null);
   const [cloudAverage, setCloudAverage] = useState<number | null>(null);
   const cloudAverageRef = useRef<number | null>(null);
+  const [moon, setMoon] = useState<MoonTrack | null>(null);
+  const moonRef = useRef<MoonTrack | null>(null);
   const idsKey = selectedIds.join(",");
   const { lat, lon } = location;
 
@@ -313,6 +400,30 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
     };
   }, [lat, lon]);
 
+  // Moon sub-point + track; refresh every minute (it moves only ~15°/hour).
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/sky/moon");
+        const body = await response.json();
+        if (cancelled || !body?.data) {
+          return;
+        }
+        moonRef.current = body.data as MoonTrack;
+        setMoon(body.data as MoonTrack);
+      } catch {
+        // The moon overlay is decorative — fail silently.
+      }
+    };
+    load();
+    const timer = setInterval(load, TRACK_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
   // Animate at 60fps using the latest data (refs avoid re-running the loop).
   useEffect(() => {
     let frame = 0;
@@ -323,15 +434,72 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
           location: { lat, lon },
           tles: tlesRef.current,
           tracks: tracksRef.current,
+          moon: moonRef.current,
           now: new Date(),
           cloudAverage: cloudAverageRef.current,
+          focusedId,
         });
       }
       frame = requestAnimationFrame(draw);
     };
     frame = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(frame);
-  }, [lat, lon]);
+  }, [lat, lon, focusedId]);
+
+  // Clicking the disc: a blip focuses that satellite (mirroring the globe),
+  // the "You" marker at the center hands the view back, and empty space
+  // clears the focus. Same projection as drawRadar, so the hit targets sit
+  // exactly on the dots.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    const onPointerUp = (event: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const scale = rect.width / LOGICAL_SIZE;
+      const inner = (LOGICAL_SIZE / 2 - PAD) * scale;
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const dx = event.clientX - cx;
+      const dy = event.clientY - cy;
+      // Outside the radar disc — ignore (range rings and labels live there).
+      if (Math.hypot(dx, dy) > inner) {
+        return;
+      }
+      // The "You" marker at the disc's center clears any satellite focus
+      // (the radar is always centered on you).
+      if (Math.hypot(dx, dy) < rect.width * 0.04) {
+        onFocusChange(null);
+        return;
+      }
+      // Hit-test the live blips — nearest within ~14px wins.
+      const kmPerPx = RADAR_RADIUS_KM / inner;
+      const now = new Date();
+      let best: { id: string; dist: number } | null = null;
+      for (const tle of tlesRef.current) {
+        const point = currentGroundPoint(tle.line1, tle.line2, now);
+        if (!point) {
+          continue;
+        }
+        const { eastKm, northKm } = toLocalKm(
+          point.lat,
+          point.lon,
+          location,
+        );
+        const clamped = clampToRadius(eastKm, northKm);
+        const x = cx + clamped.eastKm / kmPerPx;
+        const y = cy - clamped.northKm / kmPerPx;
+        const dist = Math.hypot(event.clientX - x, event.clientY - y);
+        if (dist < 14 && (!best || dist < best.dist)) {
+          best = { id: tle.noradId, dist };
+        }
+      }
+      onFocusChange(best ? (focusedId === best.id ? null : best.id) : null);
+    };
+    canvas.addEventListener("pointerup", onPointerUp);
+    return () => canvas.removeEventListener("pointerup", onPointerUp);
+  }, [onFocusChange, focusedId, location]);
 
   return (
     <div className="glass glass-hover rounded-2xl p-6">
@@ -408,22 +576,46 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
             — past 30 min (dim) and the next 90 min (bright). Positions update
             live; the dashed ring is the horizon for a ~400 km orbit.
           </p>
-          <ul className="space-y-2">
+          <ul className="space-y-1.5">
             {tles.map((tle, index) => (
-              <li key={tle.noradId} className="flex items-center gap-2.5">
-                <span
-                  className="size-2.5 rounded-full"
-                  style={{
-                    backgroundColor: COLORS[index % COLORS.length],
-                    boxShadow: `0 0 8px ${COLORS[index % COLORS.length]}`,
-                  }}
-                />
-                <span className="text-sm text-slate-200">{tle.name}</span>
-                <span className="mono ml-auto text-[10px] text-slate-500">
-                  NORAD {tle.noradId}
-                </span>
+              <li key={tle.noradId}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onFocusChange(
+                      focusedId === tle.noradId ? null : tle.noradId,
+                    )
+                  }
+                  aria-pressed={focusedId === tle.noradId}
+                  className={`flex w-full items-center gap-2.5 rounded-md px-1.5 py-1 text-left transition ${
+                    focusedId === tle.noradId
+                      ? "bg-white/10 ring-1 ring-white/15"
+                      : "hover:bg-white/5"
+                  }`}
+                >
+                  <span
+                    className="size-2.5 shrink-0 rounded-full"
+                    style={{
+                      backgroundColor: COLORS[index % COLORS.length],
+                      boxShadow: `0 0 8px ${COLORS[index % COLORS.length]}`,
+                    }}
+                  />
+                  <span className="text-sm text-slate-200">{tle.name}</span>
+                  <span className="mono ml-auto text-[10px] text-slate-500">
+                    NORAD {tle.noradId}
+                  </span>
+                </button>
               </li>
             ))}
+            {moon && (
+              <li className="flex items-center gap-2.5">
+                <span className="inline-block size-2.5 rounded-full border-2 border-slate-200" />
+                <span className="text-sm text-slate-200">Moon</span>
+                <span className="mono ml-auto text-[10px] text-slate-500">
+                  sub-point
+                </span>
+              </li>
+            )}
           </ul>
           <p className="pt-1 text-[11px] text-slate-600">
             TLEs from CelesTrak · refreshed every minute

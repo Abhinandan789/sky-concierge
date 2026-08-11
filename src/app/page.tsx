@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { LocateButton } from "@/components/locate-button";
 import { PushNotifications } from "@/components/push-notifications";
 import { SatellitePicker } from "@/components/satellite-picker";
+import { LocationInput } from "@/components/location-input";
 import { SkyViewSection } from "@/components/sky-view-section";
 import { SkyBriefSection } from "@/components/sky-brief-view";
 import { SubscribeSection } from "@/components/subscribe-form";
@@ -29,7 +30,13 @@ function BriefSkeleton() {
 export default async function HomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ lat?: string; lon?: string; sat?: string }>;
+  searchParams: Promise<{
+    lat?: string;
+    lon?: string;
+    sat?: string;
+    view?: string;
+    focus?: string;
+  }>;
 }) {
   const params = await searchParams;
   const requestedLat = parseNumber(params.lat);
@@ -48,6 +55,12 @@ export default async function HomePage({
     satelliteIds.valid && satelliteIds.ids.length > 0 ? satelliteIds.ids : [];
   const noradIds =
     selectedSatelliteIds.length > 0 ? selectedSatelliteIds : undefined;
+
+  // Optional ?view=globe and ?focus=<norad> — restored into the tracker so a
+  // page refresh (or a shared link) lands on the same view and satellite.
+  const initialView = params.view === "globe" ? "globe" : "radar";
+  const initialFocus =
+    params.focus && /^\d+$/.test(params.focus) ? params.focus : null;
 
   return (
     <main className="relative">
@@ -83,6 +96,13 @@ export default async function HomePage({
         <p className="mono mt-6 text-xs text-slate-500">
           showing {formatCoordinates(location.lat, location.lon)}
         </p>
+
+        <div className="mt-4">
+          <LocationInput
+            defaultLat={location.lat}
+            defaultLon={location.lon}
+          />
+        </div>
       </section>
 
       {/* ── Tonight's brief ──────────────────────────────────── */}
@@ -116,10 +136,11 @@ export default async function HomePage({
       <section id="radar" className="mx-auto max-w-5xl scroll-mt-8 px-4 pb-24">
         <h2 className="mb-6 text-center text-2xl font-bold text-slate-100">
           See what&apos;s overhead right now
-        </h2>
-        <SkyViewSection
+        </h2>        <SkyViewSection
           location={location}
           selectedIds={selectedSatelliteIds}
+          initialView={initialView}
+          initialFocus={initialFocus}
         />
       </section>
 
@@ -128,7 +149,10 @@ export default async function HomePage({
         <h2 className="mb-6 text-center text-2xl font-bold text-slate-100">
           Let the sky come to you
         </h2>
-        <SubscribeSection location={location} />
+        <SubscribeSection
+          location={location}
+          initialSatelliteIds={selectedSatelliteIds}
+        />
         <PushNotifications location={location} />
       </section>
 

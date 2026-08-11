@@ -35,11 +35,44 @@ const VIEWS: { id: View; label: string; icon: React.ReactNode }[] = [
 export function SkyViewSection({
   location,
   selectedIds,
+  initialView = "radar",
+  initialFocus = null,
 }: {
   location: LatLon;
   selectedIds: string[];
+  /** Restored from ?view= in the URL (server-parsed, so hydration matches). */
+  initialView?: View;
+  /** Restored from ?focus= in the URL. */
+  initialFocus?: string | null;
 }) {
-  const [view, setView] = useState<View>("radar");
+  const [view, setView] = useState<View>(initialView);
+  // Satellite currently focused — shared so switching views keeps the same
+  // dot highlighted (globe locks the camera, radar shows a focus ring).
+  const [focusedId, setFocusedId] = useState<string | null>(initialFocus);
+
+  // Persist the view + focus in the URL (?view=globe&focus=25544) so a page
+  // refresh — or sharing the link — restores the exact state. Written with
+  // history.replaceState to avoid a server round-trip on every toggle.
+  const syncUrl = (nextView: View, nextFocus: string | null) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", nextView);
+    if (nextFocus) {
+      url.searchParams.set("focus", nextFocus);
+    } else {
+      url.searchParams.delete("focus");
+    }
+    window.history.replaceState(null, "", url);
+  };
+
+  const setViewAndUrl = (nextView: View) => {
+    setView(nextView);
+    syncUrl(nextView, focusedId);
+  };
+
+  const setFocusedIdAndUrl = (nextFocus: string | null) => {
+    setFocusedId(nextFocus);
+    syncUrl(view, nextFocus);
+  };
 
   return (
     <div>
@@ -49,7 +82,7 @@ export function SkyViewSection({
             <button
               key={id}
               type="button"
-              onClick={() => setView(id)}
+              onClick={() => setViewAndUrl(id)}
               aria-pressed={view === id}
               className={cn(
                 "inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-xs font-semibold transition",
@@ -66,9 +99,19 @@ export function SkyViewSection({
       </div>
 
       {view === "radar" ? (
-        <SatelliteMap location={location} selectedIds={selectedIds} />
+        <SatelliteMap
+          location={location}
+          selectedIds={selectedIds}
+          focusedId={focusedId}
+          onFocusChange={setFocusedIdAndUrl}
+        />
       ) : (
-        <SatelliteGlobe location={location} selectedIds={selectedIds} />
+        <SatelliteGlobe
+          location={location}
+          selectedIds={selectedIds}
+          focusedId={focusedId}
+          onFocusChange={setFocusedIdAndUrl}
+        />
       )}
     </div>
   );

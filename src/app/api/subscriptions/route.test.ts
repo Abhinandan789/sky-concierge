@@ -77,6 +77,75 @@ describe("POST /api/subscriptions", () => {
     expect((await noEvents.json()).error.code).toBe("NO_EVENTS");
   });
 
+  it("stores an optional satellite selection for alert emails", async () => {
+    const response = await subscribePost(
+      post(
+        "/api/subscriptions",
+        {
+          ...VALID_BODY,
+          satelliteIds: ["48274", "25544"],
+        },
+        "203.0.113.21",
+      ),
+    );
+    expect(response.status).toBe(201);
+
+    const row = getDb()
+      .prepare(
+        `SELECT satellite_ids AS satelliteIds
+         FROM alert_subscriptions WHERE email = ?`,
+      )
+      .get(VALID_BODY.email) as { satelliteIds: string | null };
+    expect(row.satelliteIds).toBe("48274,25544");
+
+    // Without a selection the row stores NULL → server-configured set.
+    await subscribePost(
+      post(
+        "/api/subscriptions",
+        {
+          ...VALID_BODY,
+          email: "plain@example.com",
+        },
+        "203.0.113.22",
+      ),
+    );
+    const plain = getDb()
+      .prepare(
+        `SELECT satellite_ids AS satelliteIds
+         FROM alert_subscriptions WHERE email = 'plain@example.com'`,
+      )
+      .get() as { satelliteIds: string | null };
+    expect(plain.satelliteIds).toBeNull();
+  });
+
+  it("rejects invalid satellite selections", async () => {
+    const junk = await subscribePost(
+      post(
+        "/api/subscriptions",
+        {
+          ...VALID_BODY,
+          satelliteIds: ["25544", "nope"],
+        },
+        "203.0.113.31",
+      ),
+    );
+    expect(junk.status).toBe(400);
+    expect((await junk.json()).error.code).toBe("INVALID_SATELLITE_IDS");
+
+    const tooMany = await subscribePost(
+      post(
+        "/api/subscriptions",
+        {
+          ...VALID_BODY,
+          satelliteIds: ["1", "2", "3", "4", "5"],
+        },
+        "203.0.113.32",
+      ),
+    );
+    expect(tooMany.status).toBe(400);
+    expect((await tooMany.json()).error.code).toBe("INVALID_SATELLITE_IDS");
+  });
+
   it("requires confirmation when a real sender is configured, then verifies", async () => {
     vi.stubEnv("RESEND_API_KEY", "test-key");
     const resendMock = vi.fn(async () => new Response("{}", { status: 200 }));
@@ -163,9 +232,14 @@ describe("POST /api/subscriptions", () => {
     ).unsubscribeToken;
 
     // Someone who doesn't control the mailbox re-submits the address with
-    // different events — the change must NOT apply…
+    // different events AND a different satellite set — the changes must NOT
+    // apply…
     const resubmit = await subscribePost(
-      post("/api/subscriptions", { ...VALID_BODY, events: ["showers"] }),
+      post("/api/subscriptions", {
+        ...VALID_BODY,
+        events: ["showers"],
+        satelliteIds: ["48274"],
+      }),
     );
     const resubmitBody = await resubmit.json();
     expect(resubmitBody.data.verified).toBe(true);
@@ -176,19 +250,25 @@ describe("POST /api/subscriptions", () => {
     const row = getDb()
       .prepare(
         `SELECT unsubscribe_token AS unsubscribeToken, events,
-                pending_events AS pendingEvents
+                pending_events AS pendingEvents,
+                satellite_ids AS satelliteIds,
+                pending_satellite_ids AS pendingSatelliteIds
          FROM alert_subscriptions WHERE email = ?`,
       )
       .get(VALID_BODY.email) as {
       unsubscribeToken: string;
       events: string;
       pendingEvents: string | null;
+      satelliteIds: string | null;
+      pendingSatelliteIds: string | null;
     };
     expect(row.unsubscribeToken).toBe(ownerToken);
     expect(row.events).toBe("iss,aurora");
     expect(row.pendingEvents).toBe("showers");
+    expect(row.satelliteIds).toBeNull(); // unchanged (never had a selection)
+    expect(row.pendingSatelliteIds).toBe("48274"); // parked for confirmation
 
-    // The owner's confirmation is what authorizes the change.
+    // The owner's confirmation is what authorizes the changes.
     const freshVerifyToken = (
       getDb()
         .prepare(
@@ -202,15 +282,21 @@ describe("POST /api/subscriptions", () => {
     );
     const applied = getDb()
       .prepare(
-        `SELECT events, pending_events AS pendingEvents
+        `SELECT events, pending_events AS pendingEvents,
+                satellite_ids AS satelliteIds,
+                pending_satellite_ids AS pendingSatelliteIds
          FROM alert_subscriptions WHERE email = ?`,
       )
       .get(VALID_BODY.email) as {
       events: string;
       pendingEvents: string | null;
+      satelliteIds: string | null;
+      pendingSatelliteIds: string | null;
     };
     expect(applied.events).toBe("showers");
     expect(applied.pendingEvents).toBeNull();
+    expect(applied.satelliteIds).toBe("48274");
+    expect(applied.pendingSatelliteIds).toBeNull();
   });
 
   it("rate limits repeated signups from one IP", async () => {

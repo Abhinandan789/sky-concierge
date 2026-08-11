@@ -11,6 +11,7 @@ import {
   type GroundTrackPoint,
 } from "@/lib/satellite-map";
 import type { LatLon } from "@/types";
+import type { MoonTrack, MoonTrackPoint } from "@/services/sky/moon-track";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { SatelliteGlobeHud } from "./satellite-globe-hud";
@@ -26,6 +27,9 @@ interface SatelliteGlobeProps {
   location: LatLon;
   /** NORAD ids selected in the picker; empty = server-configured set. */
   selectedIds: string[];
+  /** Satellite currently focused (locked onto) — shared with the radar view. */
+  focusedId: string | null;
+  onFocusChange: (id: string | null) => void;
 }
 
 /** Earth's rotation rate about its axis (sidereal day), radians/second. */
@@ -35,8 +39,41 @@ const TRACK_REFRESH_MS = 60_000;
 /** Lift applied to ground tracks so they don't z-fight the surface. */
 const TRACK_LIFT_KM = 10;
 const COLORS = ["#22d3ee", "#fbbf24", "#e879f9", "#34d399"];
+/** Moon overlay color — a neutral white ring, distinct from satellite dots. */
+const MOON_COLOR = "#f1f5f9";
 /** How often telemetry (altitude/velocity/elevation) reaches the HUD. */
 const TELEMETRY_INTERVAL_MS = 500;
+/** Moon path window on the globe — the sub-point moves ~15°/hour west, so
+ * 30 min back / 60 min ahead stays a short arc hugging the ring marker. */
+const MOON_PAST_WINDOW_MS = 30 * 60_000;
+const MOON_FUTURE_WINDOW_MS = 60 * 60_000;
+/** How often the moon marker/path re-anchors to the live sub-point. */
+const MOON_ADVANCE_MS = 1_000;
+
+/**
+ * Linear sub-point between two 10-minute track samples, longitude wrap-safe.
+ * The drift is dominated by Earth's rotation (~15°/hour), so straight-line
+ * interpolation over a 10-minute span is accurate to well under a pixel.
+ */
+function interpolateSubPoint(
+  a: MoonTrackPoint,
+  b: MoonTrackPoint,
+  t: number,
+): MoonTrackPoint {
+  const span = Math.max(1, b.time - a.time);
+  const frac = (t - a.time) / span;
+  let dLon = b.lon - a.lon;
+  if (dLon > 180) {
+    dLon -= 360;
+  } else if (dLon < -180) {
+    dLon += 360;
+  }
+  return {
+    time: t,
+    lat: a.lat + (b.lat - a.lat) * frac,
+    lon: a.lon + dLon * frac,
+  };
+}
 /** Pointer movement (px) under which a press counts as a click, not a drag. */
 const CLICK_SLOP_PX = 6;
 
@@ -47,11 +84,52 @@ export interface GlobeSatelliteTelemetry {
   elevationDeg: number;
   azimuthDeg: number;
   inView: boolean;
+  /** Live sub-point (where the satellite is directly overhead). */
+  lat: number;
+  lon: number;
 }
 
 export interface GlobeTelemetry {
   /** Keyed by NORAD id. */
   sats: Record<string, GlobeSatelliteTelemetry>;
+}
+
+/**
+ * Great-circle (slerp) interpolation between two unit vectors, in place —
+ * used to rotate the view toward a satellite without the globe shifting.
+ * Handles the near-opposite case (theta ≈ π) where classic slerp divides
+ * by zero, by rotating around a perpendicular axis instead.
+ */
+function slerpUnit(
+  out: THREE.Vector3,
+  from: THREE.Vector3,
+  to: THREE.Vector3,
+  t: number,
+): void {
+  const dot = THREE.MathUtils.clamp(from.dot(to), -1, 1);
+  const theta = Math.acos(dot);
+  if (theta < 1e-6) {
+    out.copy(to);
+    return;
+  }
+  if (theta > Math.PI - 1e-3) {
+    // Nearly opposite: choose an axis perpendicular to `from` and rotate.
+    const axis = new THREE.Vector3(1, 0, 0);
+    if (Math.abs(from.x) > 0.9) {
+      axis.set(0, 1, 0);
+    }
+    axis.crossVectors(from, axis).normalize();
+    out
+      .copy(from)
+      .applyQuaternion(new THREE.Quaternion().setFromAxisAngle(axis, theta * t));
+    return;
+  }
+  const sinTheta = Math.sin(theta);
+  const a = Math.sin((1 - t) * theta) / sinTheta;
+  const b = Math.sin(t * theta) / sinTheta;
+  out
+    .set(a * from.x + b * to.x, a * from.y + b * to.y, a * from.z + b * to.z)
+    .normalize();
 }
 
 /** Earth-fixed lat/lon (+ altitude) → position inside the globe group. */
@@ -68,6 +146,49 @@ function latLonAltToVector3(
     radius * Math.cos(phi),
     radius * Math.sin(phi) * Math.sin(theta),
   );
+}
+
+/** A hollow ring sprite — the Moon's marker, distinct from filled dots. */
+function makeRingSprite(color: string): THREE.Sprite {
+  const size = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const rgb = new THREE.Color(color);
+  const center = size / 2;
+  const glow = ctx.createRadialGradient(
+    center,
+    center,
+    0,
+    center,
+    center,
+    center,
+  );
+  glow.addColorStop(
+    0,
+    `rgba(${Math.round(rgb.r * 255)}, ${Math.round(rgb.g * 255)}, ${Math.round(rgb.b * 255)}, 0.25)`,
+  );
+  glow.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, size, size);
+  ctx.beginPath();
+  ctx.arc(center, center, 14, 0, Math.PI * 2);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3.5;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 10;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  const texture = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+    }),
+  );
+  return sprite;
 }
 
 /** Radial-gradient glow sprite (a soft billboard dot). */
@@ -173,7 +294,10 @@ interface GlobeView {
   earthGroup: THREE.Group;
   updateSatellites: (tles: TleEntry[]) => void;
   updateObserver: (lat: number, lon: number) => void;
+  updateMoon: (track: MoonTrack) => void;
   setSelected: (id: string | null) => void;
+  /** Swing the camera to look at the observer's location on the globe. */
+  centerOnObserver: () => void;
   dispose: () => void;
 }
 
@@ -265,6 +389,21 @@ function createGlobeView(
   let observer: LatLon = { lat: 0, lon: 0 };
   let selectedId: string | null = null;
   let youGlow: THREE.Sprite | null = null;
+  // Moon overlay (marker + past/future ground track). The fetched samples
+  // stay in `moonTrack`; the animate loop advances the marker/path live.
+  let moonMarker: THREE.Sprite | null = null;
+  let moonPastLine: THREE.Line | null = null;
+  let moonFutureLine: THREE.Line | null = null;
+  let moonTrack: MoonTrack | null = null;
+  let lastMoonAdvanceAt = 0;
+  // View lock: when a satellite is selected the camera rotates (on a sphere
+  // around the globe's center) to bring the dot to the middle of the screen
+  // and keep it there as it orbits — the globe itself never shifts.
+  let hooked = false;
+  // One-shot swing target (unit vector) for "center on you".
+  let swingTarget: THREE.Vector3 | null = null;
+  const cameraDir = new THREE.Vector3().copy(camera.position).normalize();
+  const up = new THREE.Vector3(0, 1, 0);
 
   const updateSatellites = (tles: TleEntry[]) => {
     for (const sat of sats.values()) {
@@ -300,9 +439,113 @@ function createGlobeView(
     earthGroup.add(youGlow);
   };
 
+  const updateMoon = (track: MoonTrack) => {
+    moonTrack = track;
+    lastMoonAdvanceAt = 0;
+    for (const object of [moonMarker, moonPastLine, moonFutureLine]) {
+      if (!object) {
+        continue;
+      }
+      earthGroup.remove(object);
+      object.geometry?.dispose();
+      (object.material as THREE.Material).dispose();
+      if (object instanceof THREE.Sprite) {
+        (object.material as THREE.SpriteMaterial).map?.dispose();
+      }
+    }
+    moonMarker = null;
+    moonPastLine = null;
+    moonFutureLine = null;
+
+    // Marker at the current sub-point, just above the surface.
+    moonMarker = makeRingSprite(MOON_COLOR);
+    moonMarker.scale.set(0.11, 0.11, 1);
+    moonMarker.position.copy(
+      latLonAltToVector3(track.now.lat, track.now.lon, TRACK_LIFT_KM),
+    );
+    earthGroup.add(moonMarker);
+
+    // Ground track: past dim, future bright, split at the current moment.
+    const positions = new Float32Array(track.track.length * 3);
+    track.track.forEach((point, i) => {
+      const v = latLonAltToVector3(point.lat, point.lon, TRACK_LIFT_KM);
+      positions[i * 3] = v.x;
+      positions[i * 3 + 1] = v.y;
+      positions[i * 3 + 2] = v.z;
+    });
+    const makeLine = (opacity: number) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(positions, 3),
+      );
+      return new THREE.Line(
+        geometry,
+        new THREE.LineBasicMaterial({
+          color: MOON_COLOR,
+          transparent: true,
+          opacity,
+        }),
+      );
+    };
+    const splitIndex = track.track.findIndex(
+      (point) => point.time > track.now.time,
+    );
+    // The Moon's sub-point drifts ~15°/hour west, so even a short window is a
+    // visible arc. Trim the API's ±hours window down so the path reads as a
+    // compact tail around the ring marker instead of a globe-spanning line.
+    const nowMs = track.now.time;
+    const startIndex = track.track.findIndex(
+      (point) => point.time >= nowMs - MOON_PAST_WINDOW_MS,
+    );
+    const endIndex = track.track.findIndex(
+      (point) => point.time > nowMs + MOON_FUTURE_WINDOW_MS,
+    );
+    const start = startIndex === -1 ? 0 : startIndex;
+    const end = endIndex === -1 ? track.track.length : endIndex;
+    const split =
+      splitIndex === -1 ? end : Math.max(start, Math.min(end, splitIndex));
+    moonPastLine = makeLine(0.2);
+    moonPastLine.geometry.setDrawRange(start, split - start);
+    moonFutureLine = makeLine(0.55);
+    moonFutureLine.geometry.setDrawRange(split, end - split);
+    earthGroup.add(moonPastLine, moonFutureLine);
+  };
+
   const setSelected = (id: string | null) => {
     selectedId = id;
+    // Hooking starts the swing from wherever the user is looking; the camera
+    // direction lerps toward the satellite each frame. Controls stay enabled
+    // so the very first interaction (drag/wheel) fires OrbitControls' "start"
+    // event below, which releases the lock — that's the "drag to release".
+    hooked = id !== null;
   };
+
+  const centerOnObserver = () => {
+    if (!youGlow) {
+      return;
+    }
+    // Release any satellite hook so the swing isn't fought, then aim the
+    // camera at the observer's spot (captured at press time — the earth's
+    // rotation over a one-second swing is imperceptible).
+    selectedId = null;
+    hooked = false;
+    controls.enabled = true;
+    callbacks.onSelect(null);
+    swingTarget = youGlow.position
+      .clone()
+      .applyMatrix4(earthGroup.matrixWorld)
+      .normalize();
+  };
+
+  // User interaction (drag/zoom) hands control back — release the hook so
+  // the globe can be freely rotated again.
+  controls.addEventListener("start", () => {
+    if (hooked) {
+      hooked = false;
+      controls.enabled = true;
+    }
+  });
 
   // Click-to-select: a press that doesn't move much is a tap on a satellite.
   const raycaster = new THREE.Raycaster();
@@ -412,6 +655,117 @@ function createGlobeView(
       sat.futureGeometry.setDrawRange(k, sat.times.length - k);
     }
 
+    // The Moon's sub-point drifts ~15°/hour west — advance the marker and pin
+    // the path ends to the live sub-point every second, so the ring visibly
+    // crawls along its track between the minute refreshes.
+    if (
+      moonTrack &&
+      moonMarker &&
+      moonPastLine &&
+      moonFutureLine &&
+      nowMs - lastMoonAdvanceAt >= MOON_ADVANCE_MS
+    ) {
+      lastMoonAdvanceAt = nowMs;
+      const pts = moonTrack.track;
+      let before: MoonTrackPoint | null = null;
+      let after: MoonTrackPoint | null = null;
+      for (let i = 0; i < pts.length; i += 1) {
+        if (pts[i].time <= nowMs) {
+          before = pts[i];
+        } else {
+          after = pts[i];
+          break;
+        }
+      }
+      const live =
+        before && after
+          ? interpolateSubPoint(before, after, nowMs)
+          : (before ?? after ?? moonTrack.now);
+
+      // Slide the trimmed window + split with the live clock.
+      const startIndex = pts.findIndex(
+        (point) => point.time >= nowMs - MOON_PAST_WINDOW_MS,
+      );
+      const endIndex = pts.findIndex(
+        (point) => point.time > nowMs + MOON_FUTURE_WINDOW_MS,
+      );
+      const start = startIndex === -1 ? 0 : startIndex;
+      const end = endIndex === -1 ? pts.length : endIndex;
+      let split = pts.findIndex((point) => point.time > nowMs);
+      if (split === -1) {
+        split = end;
+      }
+      split = Math.max(start, Math.min(end, split));
+
+      moonMarker.position.copy(
+        latLonAltToVector3(live.lat, live.lon, TRACK_LIFT_KM),
+      );
+      // Both lines share the same position buffer — pin the boundary vertex
+      // (either side of the split) to the live sub-point so they meet the ring.
+      const positions = moonPastLine.geometry.attributes.position
+        .array as Float32Array;
+      const v = latLonAltToVector3(live.lat, live.lon, TRACK_LIFT_KM);
+      for (const i of [split - 1, split]) {
+        if (i < start || i >= end) {
+          continue;
+        }
+        positions[i * 3] = v.x;
+        positions[i * 3 + 1] = v.y;
+        positions[i * 3 + 2] = v.z;
+      }
+      moonPastLine.geometry.attributes.position.needsUpdate = true;
+      moonFutureLine.geometry.attributes.position.needsUpdate = true;
+      moonPastLine.geometry.setDrawRange(start, split - start);
+      moonFutureLine.geometry.setDrawRange(split, end - split);
+    }
+
+    // Center-on-you: one-shot swing toward the observer's spot.
+    if (swingTarget) {
+      const cameraDistance = camera.position.length();
+      const angle = cameraDir.angleTo(swingTarget);
+      if (angle < 0.005) {
+        cameraDir.copy(swingTarget);
+        swingTarget = null;
+      } else {
+        const step = Math.min(
+          0.02,
+          (0.8 * Math.PI) / 180 / Math.max(angle, 1e-6),
+        );
+        slerpUnit(cameraDir, cameraDir, swingTarget, step);
+      }
+      camera.position.copy(cameraDir).multiplyScalar(cameraDistance);
+      camera.up.copy(up);
+    }
+
+    // View lock: rotate the camera around the globe's center so the selected
+    // satellite's dot sits in the middle of the screen, then keep it there.
+    // The camera distance stays fixed and the view direction eases along the
+    // great circle at a capped angular speed — the globe is never shifted in
+    // the viewport, only rotated to the point. The camera always looks at the
+    // globe's center, so the planet stays dead-center at every zoom level.
+    if (hooked && selectedId !== null) {
+      const selected = sats.get(selectedId);
+      if (selected) {
+        const cameraDistance = camera.position.length();
+        const worldPos = selected.core.position
+          .clone()
+          .applyMatrix4(earthGroup.matrixWorld);
+        const targetDir = worldPos.normalize();
+        const angle = cameraDir.angleTo(targetDir);
+        // Cap the swing at ~0.8°/frame so a full rotation is a slow, smooth
+        // arc instead of a snap; the easing handles the final settle.
+        const step = Math.min(0.02, (0.8 * Math.PI) / 180 / Math.max(angle, 1e-6));
+        slerpUnit(cameraDir, cameraDir, targetDir, step);
+        camera.position.copy(cameraDir).multiplyScalar(cameraDistance);
+        camera.up.copy(up);
+      }
+    }
+
+    // Keep the globe dead-center in the viewport at all times (the follow
+    // lock and user drags both just re-aim the camera at the origin).
+    camera.lookAt(0, 0, 0);
+    controls.target.set(0, 0, 0);
+
     // Push live numbers to the HUD at a throttled rate (React state at 60fps
     // would be wasteful — the canvas already animates at full speed).
     if (nowMs - lastTelemetryAt >= TELEMETRY_INTERVAL_MS) {
@@ -429,12 +783,19 @@ function createGlobeView(
           observer,
           now,
         );
+        const groundPoint = currentGroundPoint(
+          sat.tle.line1,
+          sat.tle.line2,
+          now,
+        );
         update.sats[sat.tle.noradId] = {
           altitudeKm: telemetryPoint?.altitudeKm ?? 0,
           speedKmS: telemetryPoint?.speedKmS ?? 0,
           elevationDeg: look?.elevationDeg ?? 0,
           azimuthDeg: look?.azimuthDeg ?? 0,
           inView: (look?.elevationDeg ?? -90) > 0,
+          lat: groundPoint?.lat ?? 0,
+          lon: groundPoint?.lon ?? 0,
         };
       }
       callbacks.onTelemetry(update);
@@ -487,12 +848,19 @@ function createGlobeView(
     earthGroup,
     updateSatellites,
     updateObserver,
+    updateMoon,
     setSelected,
+    centerOnObserver,
     dispose,
   };
 }
 
-export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
+export function SatelliteGlobe({
+  location,
+  selectedIds,
+  focusedId,
+  onFocusChange,
+}: SatelliteGlobeProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<GlobeView | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">(
@@ -500,10 +868,16 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
   );
   const [error, setError] = useState<string | null>(null);
   const [tles, setTles] = useState<TleEntry[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [telemetry, setTelemetry] = useState<GlobeTelemetry | null>(null);
   const idsKey = selectedIds.join(",");
   const { lat, lon } = location;
+
+  // The scene is created once and its callbacks are captured forever — hold
+  // the latest focus callback in a ref so the mount effect stays stable.
+  const onFocusChangeRef = useRef(onFocusChange);
+  useEffect(() => {
+    onFocusChangeRef.current = onFocusChange;
+  }, [onFocusChange]);
 
   // Create the scene once (client-only; the component is lazy-loaded). The
   // useState setters are stable across renders, so they can be captured
@@ -513,7 +887,7 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
       return;
     }
     viewRef.current = createGlobeView(mountRef.current, {
-      onSelect: setSelectedId,
+      onSelect: onFocusChangeRef.current,
       onTelemetry: setTelemetry,
     });
     return () => {
@@ -544,12 +918,6 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
         setTles(loaded);
         setStatus(loaded.length > 0 ? "ready" : "error");
         setError(null);
-        // Drop a selection that no longer exists in the new set.
-        setSelectedId((prev) =>
-          prev !== null && loaded.some((tle) => tle.noradId === prev)
-            ? prev
-            : null,
-        );
       } catch (err) {
         if (cancelled) {
           return;
@@ -567,6 +935,30 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
     };
   }, [idsKey]);
 
+  // Load the Moon's sub-point + ground track; refresh every minute (the moon
+  // moves only ~15°/hour, so this cadence is plenty for a smooth overlay).
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch("/api/sky/moon");
+        const body = await response.json();
+        if (cancelled || !body?.data) {
+          return;
+        }
+        viewRef.current?.updateMoon(body.data as MoonTrack);
+      } catch {
+        // The moon overlay is decorative — fail silently.
+      }
+    };
+    load();
+    const timer = setInterval(load, TRACK_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
   // Push TLE + observer updates into the scene whenever they change.
   useEffect(() => {
     const view = viewRef.current;
@@ -579,9 +971,20 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
     }
   }, [tles, lat, lon]);
 
+  // Drop a focus that no longer exists in the refreshed set.
   useEffect(() => {
-    viewRef.current?.setSelected(selectedId);
-  }, [selectedId]);
+    if (
+      focusedId !== null &&
+      tles.length > 0 &&
+      !tles.some((tle) => tle.noradId === focusedId)
+    ) {
+      onFocusChange(null);
+    }
+  }, [focusedId, tles, onFocusChange]);
+
+  useEffect(() => {
+    viewRef.current?.setSelected(focusedId);
+  }, [focusedId]);
 
   return (
     <div className="glass glass-hover rounded-2xl p-6">
@@ -601,23 +1004,22 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
         </span>
       </div>
 
-      <div className="flex flex-col items-center gap-5 lg:flex-row lg:items-start">
-        <div className="relative w-full max-w-[480px] shrink-0">
+      <SatelliteGlobeHud
+        tles={tles}
+        telemetry={telemetry}
+        selectedId={focusedId}
+        onSelect={onFocusChange}
+        onCenterOnYou={() => viewRef.current?.centerOnObserver()}
+        location={{ lat, lon }}
+        colors={COLORS}
+      >
+        <div className="relative mx-auto w-full max-w-3xl">
           <div
             ref={mountRef}
-            className="aspect-square w-full rounded-2xl"
+            style={{ aspectRatio: "4 / 3" }}
+            className="w-full rounded-2xl"
             aria-label="3D globe showing live satellite positions and ground tracks"
           />
-          {status === "ready" && (
-            <SatelliteGlobeHud
-              tles={tles}
-              telemetry={telemetry}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-              location={{ lat, lon }}
-              colors={COLORS}
-            />
-          )}
           {status !== "ready" && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-2xl">
               {status === "loading" ? (
@@ -639,24 +1041,20 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
             </div>
           )}
         </div>
+      </SatelliteGlobeHud>
 
-        <div className="w-full max-w-xs space-y-3 lg:pt-1">
-          <p className="text-xs leading-relaxed text-slate-500">
-            The globe spins at Earth&apos;s real rate — satellites orbit in
-            fixed space, so you see the planet revolve beneath them. The pulsing
-            dots are the satellites&apos; live positions around{" "}
-            <span className="text-slate-300">
-              {formatCoordinates(lat, lon)}
-            </span>
-            : past 30 min (dim), next 90 min (bright).
-          </p>
-          <p className="pt-1 text-[11px] leading-relaxed text-slate-600">
-            Click a satellite (or its name in the list) to track it live · drag
-            to orbit · scroll to zoom · TLEs from CelesTrak, refreshed every
-            minute
-          </p>
-        </div>
-      </div>
+      <p className="mx-auto mt-5 max-w-md text-center text-[11px] leading-relaxed text-slate-500">
+        The globe spins at Earth&apos;s real rate — satellites orbit in fixed
+        space, so you see the planet revolve beneath them. The pulsing dots are
+        the satellites&apos; live positions around{" "}
+        <span className="text-slate-300">{formatCoordinates(lat, lon)}</span>
+        ; the teal dot is you, and the white ring marks the Moon&apos;s
+        sub-point and its path.{" "}
+        <span className="text-slate-400">
+          Click a satellite (or its name in the list) to rotate the view and
+          lock onto its dot — drag the globe to release it.
+        </span>
+      </p>
     </div>
   );
 }

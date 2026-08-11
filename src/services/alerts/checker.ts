@@ -41,6 +41,8 @@ export interface SubscriptionLike {
   lat: number;
   lon: number;
   events: string;
+  /** Comma-separated NORAD ids; empty/absent = the server-configured set. */
+  satelliteIds?: string | null;
   unsubscribeToken?: string | null;
 }
 
@@ -80,6 +82,25 @@ export function isoWeekKey(date: Date): string {
     (d.getTime() - yearStart.getTime()) / 86_400_000 / 7 + 1 / 7,
   );
   return `${d.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+/**
+ * NORAD ids a subscription tracks (validated numeric, deduped), or undefined
+ * when none are stored — in which case the brief uses the server set.
+ */
+function noradIdsFor(subscription: SubscriptionLike): string[] | undefined {
+  const raw = subscription.satelliteIds?.trim() ?? "";
+  if (raw === "") {
+    return undefined;
+  }
+  const ids: string[] = [];
+  for (const id of raw.split(",")) {
+    const trimmed = id.trim();
+    if (/^\d{1,8}$/.test(trimmed) && !ids.includes(trimmed)) {
+      ids.push(trimmed);
+    }
+  }
+  return ids.length > 0 ? ids : undefined;
 }
 
 /** Approximate proximity check for matching push subscriptions to a location. */
@@ -196,7 +217,7 @@ async function buildCandidates(
 ): Promise<DueAlert[]> {
   const brief = await buildTonightBrief(
     { lat: subscription.lat, lon: subscription.lon },
-    { now, fetcher },
+    { now, fetcher, noradIds: noradIdsFor(subscription) },
   );
   const timeZone = timeZoneFor(subscription.lat, subscription.lon);
   return candidatesFromBrief(subscription, brief, now, timeZone);
@@ -490,7 +511,7 @@ export async function runDigestCheck(
     try {
       const brief = await buildTonightBrief(
         { lat: subscription.lat, lon: subscription.lon },
-        { now, fetcher },
+        { now, fetcher, noradIds: noradIdsFor(subscription) },
       );
       const timeZone = timeZoneFor(subscription.lat, subscription.lon);
       await sender.send(

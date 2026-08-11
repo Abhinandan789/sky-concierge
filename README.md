@@ -17,7 +17,9 @@ map, it's a lightweight "sky concierge" that tells you _when to look up_.
     passes with rise/set times, max elevation, azimuth and duration,
     predicted with SGP4 propagation (satellite.js) from live CelesTrak TLEs.
     The selection lives in the URL (`?sat=25544,48274`) and the brief
-    recomputes for it; alerts use the server-configured set (`ISS_NORAD_IDS`).
+    recomputes for it — and the **same selection carries into alert emails**
+    when you subscribe (each subscriber stores their own NORAD ids; empty =
+    the server-configured set `ISS_NORAD_IDS`).
   - **Aurora**: peak predicted Kp for the next 12 hours from NOAA SWPC, with a
     level badge and viewing-latitude hint.
   - **Meteor showers**: countdown to every major shower peak.
@@ -38,19 +40,26 @@ map, it's a lightweight "sky concierge" that tells you _when to look up_.
   - **Live sky radar** — a custom canvas map (no map tiles) centered on your
     location, plotting each tracked satellite's live position and ground
     track (past 30 min dim, next 90 min bright) with range rings, the
-    horizon circle, and a cloud-cover haze. TLEs come from the same cache as
-    the brief and are propagated in the browser, so the map animates in real
-    time.
+    horizon circle, and a cloud-cover haze. The **Moon's sub-point** (where it
+    is directly overhead) and its sweeping ground track are overlaid too. TLEs
+    come from the same cache as the brief and are propagated in the browser,
+    so the map animates in real time.
   - **3D sky globe** — a WebGL globe (three.js) with the night-lights Earth
     texture, starfield, live satellite blips and ground tracks. The globe
     rotates at Earth's **real sidereal rate**, so you see the planet
-    genuinely revolve beneath the satellites. Drag to orbit, scroll to zoom;
-    lazy-loaded and togglable next to the radar.
+    genuinely revolve beneath the satellites. **Click a satellite and the
+    camera swings to follow it** as it orbits; the Moon's sub-point (white
+    ring) rides the surface too. Drag to orbit, scroll to zoom; lazy-loaded
+    and togglable next to the radar.
   - All times render in **the location's timezone** (derived from lat/lon),
     not the server's.
 - **Location-aware** — "Use my location" button, `?lat=&lon=` in the URL, and
   your last location is remembered between visits.
-- **Alert subscriptions** — pick events + email, stored in SQLite:
+- **Alert subscriptions** — pick events + email + satellites, stored in
+  SQLite:
+  - **Per-subscriber satellites**: choose which NORAD ids to be alerted
+    about (pre-filled from the tracker picker); pass alerts are computed
+    for exactly that set.
   - **Double opt-in**: with a real email sender configured, a confirmation
     email is sent first; unconfirmed addresses never receive alerts.
   - **One-click unsubscribe** link in every email.
@@ -144,6 +153,7 @@ src/
     api/sky/brief           GET  tonight's brief for ?lat=&lon=&norad=
     api/sky/tles            GET  TLEs for the live radar (?norad=)
     api/sky/clouds          GET  tonight's cloud summary for the radar
+    api/sky/moon            GET  moon sub-point + ground track (globe/radar)
     api/subscriptions       POST create (double opt-in) / verify / unsubscribe
     api/push-subscriptions  POST/DELETE browser push registrations
     api/push/public-key     GET  VAPID public key for the browser
@@ -213,4 +223,7 @@ Key design choices:
 - [x] 3D sky globe (three.js, real sidereal rotation)
 - [x] Cloud-cover forecast (Open-Meteo) — brief badge, timeline + radar overlay
 - [x] Planets & moon-planet conjunctions (astronomy-engine)
+- [x] Camera follow on the globe (click a satellite, it stays centered)
+- [x] Moon sub-point + ground track overlay (globe + radar)
+- [x] Per-subscriber satellite selections in alert emails
 - [ ] Deployment (Vercel) + cron for the alert engine
