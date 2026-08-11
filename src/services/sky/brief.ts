@@ -1,17 +1,26 @@
 import type {
   AuroraInfo,
+  CloudSummary,
+  ConjunctionEvent,
   IssPass,
   LatLon,
   MoonInfo,
+  PlanetEvent,
   ShowerInfo,
   SkyBrief,
   SkyBriefError,
 } from "@/types";
-import { computeTonightAurora, fetchKpForecast } from "./aurora";
+import { computeTonightAurora } from "./aurora";
+import {
+  getCachedCloudForecast,
+  getCachedKpForecast,
+  getCachedTleSet,
+} from "./cache";
+import { summarizeCloudCover } from "./clouds";
 import { findSatellitePasses } from "./iss-passes";
-import { computeMoonInfo } from "./moon";
+import { computeMoonInfo, getTonightBounds } from "./moon";
+import { computeMoonConjunctions, computePlanetEvents } from "./planets";
 import { computeShowerStatus } from "./showers";
-import { fetchTleSet } from "./tle";
 
 const DEFAULT_NORAD_IDS = ["25544"];
 const SHOWER_RELEVANCE_WINDOW_DAYS = 21;
@@ -33,6 +42,17 @@ function readNoradIds(): string[] {
   return ids.length > 0 ? ids : DEFAULT_NORAD_IDS;
 }
 
+/**
+ * Resolve the NORAD ids to track: explicit ids win, otherwise the
+ * server-configured set (env or ISS). Shared by the brief and the TLE API.
+ */
+export function resolveNoradIds(explicitIds?: string[]): string[] {
+  if (explicitIds && explicitIds.length > 0) {
+    return explicitIds;
+  }
+  return readNoradIds();
+}
+
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
@@ -49,47 +69,109 @@ export async function buildTonightBrief(
   const now = options.now ?? new Date();
   const errors: SkyBriefError[] = [];
 
-  // --- Satellite passes ---
+  // --- Satellite passes + aurora + clouds, fetched in parallel ---
   let issPasses: IssPass[] = [];
-  try {
-    const ids = options.noradIds ?? readNoradIds();
-    const all: IssPass[] = [];
-    for (const id of ids) {
-      const tle = await fetchTleSet(id, fetcher);
-      all.push(
-        ...findSatellitePasses(tle.line1, tle.line2, location, {
-          now,
-          windowHours: options.windowHours,
-        }),
-      );
-    }
-    all.sort((a, b) => a.start.getTime() - b.start.getTime());
-    issPasses = all;
-  } catch (error) {
-    errors.push({ section: "iss", message: errorMessage(error) });
-  }
-
-  // --- Aurora ---
   let aurora: AuroraInfo | null = null;
-  try {
-    const rows = await fetchKpForecast(fetcher);
-    aurora = computeTonightAurora(rows, now);
-  } catch (error) {
-    errors.push({ section: "aurora", message: errorMessage(error) });
+  let clouds: CloudSummary = { level: "UNKNOWN", average: null, hours: [] };
+  const [passResult, auroraRows, cloudResult] = await Promise.allSettled([
+    (async () => {
+      const ids = resolveNoradIds(options.noradIds);
+      const all: IssPass[] = [];
+      for (const id of ids) {
+        // Each satellite is fetched independently so one bad NORAD id (or a
+        // transient CelesTrak miss) degrades that satellite only — the rest
+        // of the selection still gets its passes.
+        try {
+          const tle = await getCachedTleSet(id, fetcher);
+          const passes = findSatellitePasses(tle.line1, tle.line2, location, {
+            now,
+            windowHours: options.windowHours,
+          });
+          all.push(
+            ...passes.map((pass) => ({ ...pass, satelliteName: tle.name })),
+          );
+        } catch (error) {
+          errors.push({
+            section: "iss",
+            message: `NORAD ${id}: ${errorMessage(error)}`,
+          });
+        }
+      }
+      all.sort((a, b) => a.start.getTime() - b.start.getTime());
+      return all;
+    })(),
+    getCachedKpForecast(fetcher),
+    getCachedCloudForecast(location.lat, location.lon, fetcher),
+  ]);
+
+  if (passResult.status === "fulfilled") {
+    issPasses = passResult.value;
+  } else {
+    errors.push({ section: "iss", message: errorMessage(passResult.reason) });
+  }
+  if (auroraRows.status === "fulfilled") {
+    aurora = computeTonightAurora(auroraRows.value, now);
+  } else {
+    errors.push({
+      section: "aurora",
+      message: errorMessage(auroraRows.reason),
+    });
+  }
+  if (cloudResult.status === "fulfilled") {
+    const bounds = getTonightBounds(location, now);
+    clouds = bounds
+      ? summarizeCloudCover(cloudResult.value, bounds.start, bounds.end)
+      : { level: "UNKNOWN", average: null, hours: [] };
+  } else {
+    errors.push({
+      section: "clouds",
+      message: errorMessage(cloudResult.reason),
+    });
   }
 
   // --- Meteor showers ---
   let showers: ShowerInfo[] = [];
   try {
     showers = computeShowerStatus(now).filter(
-      (shower) => Math.abs(shower.daysUntilPeak) <= SHOWER_RELEVANCE_WINDOW_DAYS,
+      (shower) =>
+        Math.abs(shower.daysUntilPeak) <= SHOWER_RELEVANCE_WINDOW_DAYS,
     );
   } catch (error) {
     errors.push({ section: "showers", message: errorMessage(error) });
   }
 
+  // --- Planets & moon-planet conjunctions (all local math) ---
+  let planets: PlanetEvent[] = [];
+  let conjunctions: ConjunctionEvent[] = [];
+  try {
+    const bounds = getTonightBounds(location, now);
+    if (bounds) {
+      planets = computePlanetEvents(location, bounds.start, bounds.end);
+      conjunctions = computeMoonConjunctions(
+        location,
+        bounds.start,
+        bounds.end,
+      );
+    }
+  } catch (error) {
+    errors.push({ section: "planets", message: errorMessage(error) });
+  }
+
   // --- Moon & viewing window ---
   const moon: MoonInfo = computeMoonInfo(location, now);
+
+  // Collapse per-satellite failures into one entry per section.
+  const mergedErrors: SkyBriefError[] = [];
+  for (const error of errors) {
+    const existing = mergedErrors.find(
+      (candidate) => candidate.section === error.section,
+    );
+    if (existing) {
+      existing.message = `${existing.message}; ${error.message}`;
+    } else {
+      mergedErrors.push({ ...error });
+    }
+  }
 
   return {
     location,
@@ -98,6 +180,9 @@ export async function buildTonightBrief(
     aurora,
     showers,
     moon,
-    errors,
+    clouds,
+    planets,
+    conjunctions,
+    errors: mergedErrors,
   };
 }

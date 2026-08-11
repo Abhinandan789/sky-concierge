@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { RememberedLocation } from "@/components/remembered-location";
 import { Starfield } from "@/components/starfield";
 import { Toaster } from "@/components/sonner";
 import { APP_DESCRIPTION, APP_NAME, APP_TAGLINE } from "@/config/site";
@@ -23,6 +24,7 @@ export default function RootLayout({
     <html lang="en">
       <body className="antialiased">
         <Starfield />
+        <RememberedLocation />
         <div className="relative z-10">{children}</div>
         <Toaster />
       </body>

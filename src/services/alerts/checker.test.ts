@@ -1,7 +1,26 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSkyDb, upsertSubscription } from "@/lib/db";
+import {
+  createSkyDb,
+  listEnabledPushSubscriptions,
+  upsertPushSubscription,
+  upsertSubscription,
+} from "@/lib/db";
+import { formatTime } from "@/lib/utils";
 import type { IssPass, SkyBrief } from "@/types";
-import { candidatesFromBrief, runAlertCheck } from "./checker";
+import * as briefModule from "@/services/sky/brief";
+import { sendPush } from "./push";
+import {
+  candidatesFromBrief,
+  composeDigestMessage,
+  isoWeekKey,
+  runAlertCheck,
+  runDigestCheck,
+} from "./checker";
+
+// Control push dispatch directly; the real sendPush no-ops without VAPID keys.
+vi.mock("./push", () => ({
+  sendPush: vi.fn(async () => undefined),
+}));
 
 const NOW = new Date("2026-08-11T20:00:00Z");
 
@@ -33,6 +52,9 @@ function makeBrief(overrides: Partial<SkyBrief> = {}): SkyBrief {
       moonDownAllNight: false,
       darkHours: 0,
     },
+    clouds: { level: "CLEAR", average: 10, hours: [] },
+    planets: [],
+    conjunctions: [],
     errors: [],
     ...overrides,
   };
@@ -61,6 +83,33 @@ describe("candidatesFromBrief", () => {
     expect(candidates.map((c) => c.eventType)).toContain("iss");
     expect(candidates.find((c) => c.eventType === "iss")?.message.subject).toBe(
       "ISS pass in ~30 min over your location",
+    );
+  });
+
+  it("uses the satellite name in the alert subject when present", () => {
+    const candidates = candidatesFromBrief(
+      SUBSCRIPTION,
+      makeBrief({
+        issPasses: [{ ...makePass(30), satelliteName: "ISS (ZARYA)" }],
+      }),
+      NOW,
+    );
+    expect(candidates.find((c) => c.eventType === "iss")?.message.subject).toBe(
+      "ISS (ZARYA) pass in ~30 min over your location",
+    );
+  });
+
+  it("renders alert times in the requested timezone", () => {
+    const candidates = candidatesFromBrief(
+      SUBSCRIPTION,
+      makeBrief({ issPasses: [makePass(30)] }),
+      NOW,
+      "America/New_York",
+    );
+    const body = candidates.find((c) => c.eventType === "iss")?.message.body;
+    // The pass starts 30 min after NOW (20:00Z) → 20:30Z = 16:30 in New York.
+    expect(body).toContain(
+      formatTime(new Date(NOW.getTime() + 30 * 60_000), "America/New_York"),
     );
   });
 
@@ -152,6 +201,19 @@ describe("candidatesFromBrief", () => {
     );
     expect(candidates).toHaveLength(0);
   });
+
+  it("alerts for the subscriber's chosen satellite, using its name", () => {
+    const candidates = candidatesFromBrief(
+      { ...SUBSCRIPTION, satelliteIds: "48274" },
+      makeBrief({
+        issPasses: [{ ...makePass(30), satelliteName: "CSS (TIANHE)" }],
+      }),
+      NOW,
+    );
+    expect(candidates.find((c) => c.eventType === "iss")?.message.subject).toBe(
+      "CSS (TIANHE) pass in ~30 min over your location",
+    );
+  });
 });
 
 describe("runAlertCheck", () => {
@@ -212,7 +274,12 @@ describe("runAlertCheck", () => {
     const now = new Date(2026, 7, 11, 20, 0, 0);
 
     await expect(
-      runAlertCheck({ db, sender: failingSender, now, fetcher: offlineFetcher }),
+      runAlertCheck({
+        db,
+        sender: failingSender,
+        now,
+        fetcher: offlineFetcher,
+      }),
     ).rejects.toThrow("smtp down");
 
     // The claim was rolled back, so a healthy sender retries successfully.
@@ -267,5 +334,312 @@ describe("runAlertCheck", () => {
     } finally {
       consoleSpy.mockRestore();
     }
+  });
+
+  it("evaluates push-only subscriptions independently of email subscriptions", async () => {
+    const db = createSkyDb(":memory:");
+    // No email subscriptions at all — just a browser that registered for push.
+    upsertPushSubscription(db, {
+      endpoint: "https://push.example.com/standalone",
+      p256dh: "key",
+      auth: "auth",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+
+    const sender = { send: vi.fn(async () => undefined) };
+    const result = await runAlertCheck({
+      db,
+      sender,
+      now: new Date(2026, 7, 11, 20, 0, 0), // Perseids peak in 1 day
+      fetcher: offlineFetcher,
+    });
+
+    expect(sender.send).not.toHaveBeenCalled();
+    // The push-only browser was still evaluated (0 email subs + 1 push sub).
+    expect(result.checked).toBe(1);
+    const logs = db
+      .prepare(`SELECT event_type AS eventType FROM push_logs`)
+      .all() as { eventType: string }[];
+    expect(logs.map((log) => log.eventType)).toContain("showers");
+  });
+
+  it("disables a push endpoint that returns a permanent 404/410 and keeps going", async () => {
+    const db = createSkyDb(":memory:");
+    upsertPushSubscription(db, {
+      endpoint: "https://push.example.com/stale",
+      p256dh: "key",
+      auth: "auth",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+
+    const sender = { send: vi.fn(async () => undefined) };
+    vi.mocked(sendPush).mockRejectedValueOnce(
+      Object.assign(new Error("gone"), { statusCode: 410 }),
+    );
+
+    // Must not throw: a stale endpoint must not poison the whole run.
+    const result = await runAlertCheck({
+      db,
+      sender,
+      now: new Date(2026, 7, 11, 20, 0, 0),
+      fetcher: offlineFetcher,
+    });
+    expect(sender.send).not.toHaveBeenCalled();
+    expect(result.checked).toBe(1);
+    // The revoked endpoint is disabled and the claim rolled back, so the
+    // next run is clean and the endpoint is never retried.
+    expect(listEnabledPushSubscriptions(db)).toHaveLength(0);
+    expect(
+      (
+        db.prepare(`SELECT COUNT(*) AS n FROM push_logs`).get() as {
+          n: number;
+        }
+      ).n,
+    ).toBe(0);
+  });
+
+  it("still rethrows transient push failures for a retry", async () => {
+    const db = createSkyDb(":memory:");
+    upsertPushSubscription(db, {
+      endpoint: "https://push.example.com/flaky",
+      p256dh: "key",
+      auth: "auth",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+
+    vi.mocked(sendPush).mockRejectedValueOnce(new Error("service down"));
+    await expect(
+      runAlertCheck({
+        db,
+        sender: { send: vi.fn(async () => undefined) },
+        now: new Date(2026, 7, 11, 20, 0, 0),
+        fetcher: offlineFetcher,
+      }),
+    ).rejects.toThrow("service down");
+    // The endpoint stays enabled for the next run's retry.
+    expect(listEnabledPushSubscriptions(db)).toHaveLength(1);
+  });
+
+  it("does not double-evaluate push subs already covered by a nearby email sub", async () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "nearby@example.com",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+    upsertPushSubscription(db, {
+      endpoint: "https://push.example.com/covered",
+      p256dh: "key",
+      auth: "auth",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+
+    const sender = { send: vi.fn(async () => undefined) };
+    const result = await runAlertCheck({
+      db,
+      sender,
+      now: new Date(2026, 7, 11, 20, 0, 0),
+      fetcher: offlineFetcher,
+    });
+
+    // 1 email sub evaluated; the push sub was covered by it, not re-checked.
+    expect(result.checked).toBe(1);
+    const logs = db
+      .prepare(`SELECT event_type AS eventType FROM push_logs`)
+      .all() as { eventType: string }[];
+    expect(logs).toHaveLength(1);
+    expect(logs[0].eventType).toBe("showers");
+  });
+
+  it("evaluates the subscriber's own satellite selection, not just the server set", async () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "multi@example.com",
+      lat: 40.71,
+      lon: -74.01,
+      events: "iss",
+      satelliteIds: "48274,25544",
+    });
+
+    const spy = vi
+      .spyOn(briefModule, "buildTonightBrief")
+      .mockResolvedValue(
+        makeBrief({
+          issPasses: [{ ...makePass(30), satelliteName: "CSS (TIANHE)" }],
+        }),
+      );
+    try {
+      const sender = { send: vi.fn(async () => undefined) };
+      const result = await runAlertCheck({
+        db,
+        sender,
+        now: NOW,
+        fetcher: offlineFetcher,
+      });
+      expect(result.sent).toBe(1);
+      const options = spy.mock.calls[0][1] as briefModule.BuildBriefOptions;
+      expect(options.noradIds).toEqual(["48274", "25544"]);
+      expect(sender.send).toHaveBeenCalledWith(
+        "multi@example.com",
+        expect.objectContaining({
+          subject: expect.stringContaining("CSS (TIANHE)"),
+        }),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("falls back to the server-configured set when no satellites are stored", async () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "default@example.com",
+      lat: 40.71,
+      lon: -74.01,
+      events: "iss",
+    });
+
+    const spy = vi
+      .spyOn(briefModule, "buildTonightBrief")
+      .mockResolvedValue(makeBrief({}));
+    try {
+      await runAlertCheck({
+        db,
+        sender: { send: vi.fn(async () => undefined) },
+        now: NOW,
+        fetcher: offlineFetcher,
+      });
+      const options = spy.mock.calls[0][1] as briefModule.BuildBriefOptions;
+      expect(options.noradIds).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("appends an unsubscribe link to every emailed alert", async () => {
+    const db = createSkyDb(":memory:");
+    const { unsubscribeToken } = upsertSubscription(db, {
+      email: "unsub@example.com",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+
+    const sender = { send: vi.fn(async () => undefined) };
+    await runAlertCheck({
+      db,
+      sender,
+      now: new Date(2026, 7, 11, 20, 0, 0),
+      fetcher: offlineFetcher,
+    });
+
+    const message = (
+      sender.send.mock.calls[0] as unknown as [
+        string,
+        { subject: string; body: string },
+      ]
+    )[1];
+    expect(message.body).toContain(`/unsubscribe?token=${unsubscribeToken}`);
+  });
+});
+
+describe("isoWeekKey", () => {
+  it("computes ISO week keys (incl. year-boundary weeks)", () => {
+    // 2021-01-01 belongs to ISO week 53 of 2020.
+    expect(isoWeekKey(new Date("2021-01-01T12:00:00Z"))).toBe("2020-W53");
+    // Same week, different days → same key.
+    expect(isoWeekKey(new Date("2026-08-10T00:00:00Z"))).toBe(
+      isoWeekKey(new Date("2026-08-14T23:59:59Z")),
+    );
+    // Different weeks → different keys.
+    expect(isoWeekKey(new Date("2026-08-10T12:00:00Z"))).not.toBe(
+      isoWeekKey(new Date("2026-08-24T12:00:00Z")),
+    );
+  });
+});
+
+describe("composeDigestMessage", () => {
+  it("mentions upcoming passes, showers and aurora when present", () => {
+    const brief = makeBrief({
+      issPasses: [{ ...makePass(60), satelliteName: "ISS (ZARYA)" }],
+      aurora: { maxKpTonight: 5, level: "HIGH", viewingLatitudeHint: "hint" },
+      showers: [
+        {
+          name: "Perseids",
+          zhr: 100,
+          peakDate: "2026-08-12",
+          daysUntilPeak: 1,
+          isPeakTonight: false,
+          isPeakingThisWeek: true,
+        },
+      ],
+    });
+    const message = composeDigestMessage(brief, NOW);
+    expect(message.subject).toBe("Sky Concierge — weekly sky highlights");
+    expect(message.body).toContain("ISS (ZARYA)");
+    expect(message.body).toContain("Perseids");
+    expect(message.body).toContain("Aurora watch");
+  });
+});
+
+describe("runDigestCheck", () => {
+  it("sends a digest at most once per ISO week", async () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "digest@example.com",
+      lat: 40.71,
+      lon: -74.01,
+      events: "iss,aurora,showers",
+    });
+
+    const sender = { send: vi.fn(async () => undefined) };
+    const now = new Date(2026, 7, 11, 20, 0, 0); // Tuesday
+
+    const first = await runDigestCheck({
+      db,
+      sender,
+      now,
+      fetcher: offlineFetcher,
+    });
+    expect(first.checked).toBe(1);
+    expect(first.sent).toBe(1);
+
+    const second = await runDigestCheck({
+      db,
+      sender,
+      now,
+      fetcher: offlineFetcher,
+    });
+    expect(second.sent).toBe(0);
+    expect(sender.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips unverified subscriptions", async () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "pending@example.com",
+      lat: 40.71,
+      lon: -74.01,
+      events: "iss",
+      verified: false,
+    });
+
+    const sender = { send: vi.fn(async () => undefined) };
+    const result = await runDigestCheck({
+      db,
+      sender,
+      fetcher: offlineFetcher,
+    });
+    expect(result.checked).toBe(0);
+    expect(sender.send).not.toHaveBeenCalled();
   });
 });

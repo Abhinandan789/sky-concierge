@@ -1,4 +1,5 @@
 import { clsx, type ClassValue } from "clsx";
+import tzLookup from "tz-lookup";
 import { twMerge } from "tailwind-merge";
 
 export function cn(...inputs: ClassValue[]) {
@@ -10,20 +11,35 @@ export interface LatLon {
   lon: number;
 }
 
-/** Format a Date as local HH:MM. */
-export function formatTime(date: Date) {
+/**
+ * IANA timezone for a coordinate pair (e.g. "America/New_York"). Falls back
+ * to UTC for ocean/edge cases where the lookup returns nothing.
+ */
+export function timeZoneFor(lat: number, lon: number): string {
+  try {
+    const zone = tzLookup(lat, lon);
+    return typeof zone === "string" && zone.length > 0 ? zone : "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+/** Format a Date as HH:MM in the given timezone (server-local when omitted). */
+export function formatTime(date: Date, timeZone?: string) {
   return date.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
+    ...(timeZone ? { timeZone } : {}),
   });
 }
 
-/** Format a Date as local weekday + HH:MM. */
-export function formatDayTime(date: Date) {
+/** Format a Date as weekday + HH:MM in the given timezone. */
+export function formatDayTime(date: Date, timeZone?: string) {
   return date.toLocaleString([], {
     weekday: "short",
     hour: "2-digit",
     minute: "2-digit",
+    ...(timeZone ? { timeZone } : {}),
   });
 }
 
@@ -38,11 +54,11 @@ export function formatDuration(minutes: number) {
   return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
 }
 
-/** Format coordinates like "40.71° N, 74.01° W". */
+/** Format coordinates like "40.713° N, 74.006° W" (~110 m precision). */
 export function formatCoordinates(lat: number, lon: number) {
   const latDir = lat >= 0 ? "N" : "S";
   const lonDir = lon >= 0 ? "E" : "W";
-  return `${Math.abs(lat).toFixed(2)}° ${latDir}, ${Math.abs(lon).toFixed(2)}° ${lonDir}`;
+  return `${Math.abs(lat).toFixed(3)}° ${latDir}, ${Math.abs(lon).toFixed(3)}° ${lonDir}`;
 }
 
 const COMPASS_POINTS = [
