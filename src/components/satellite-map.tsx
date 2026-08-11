@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, Radar, Satellite } from "lucide-react";
+import { Cloud, Loader2, Radar, Satellite } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { formatCoordinates } from "@/lib/utils";
 import {
@@ -40,9 +40,11 @@ function drawRadar(
     tles: TleEntry[];
     tracks: Map<string, GroundTrackPoint[]>;
     now: Date;
+    /** Average cloud cover tonight (0-100), used to haze the disc. */
+    cloudAverage: number | null;
   },
 ) {
-  const { location, tles, tracks, now } = options;
+  const { location, tles, tracks, now, cloudAverage } = options;
   const dpr = window.devicePixelRatio || 1;
   const size = LOGICAL_SIZE;
   if (canvas.width !== size * dpr) {
@@ -194,6 +196,26 @@ function drawRadar(
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
   ctx.fillText("You", center + 9, center - 4);
+
+  // Cloud haze over the whole disc when the night is overcast — a subtle
+  // milky tint whose density tracks the average cloud cover.
+  if (cloudAverage !== null && cloudAverage > 10) {
+    ctx.beginPath();
+    ctx.arc(center, center, inner, 0, Math.PI * 2);
+    const gradient = ctx.createRadialGradient(
+      center,
+      center,
+      inner * 0.25,
+      center,
+      center,
+      inner,
+    );
+    const alpha = Math.min(0.35, (cloudAverage / 100) * 0.4);
+    gradient.addColorStop(0, `rgba(226, 232, 240, ${alpha * 0.6})`);
+    gradient.addColorStop(1, `rgba(226, 232, 240, ${alpha})`);
+    ctx.fillStyle = gradient;
+    ctx.fill();
+  }
 }
 
 /**
@@ -212,6 +234,9 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
     "loading",
   );
   const [error, setError] = useState<string | null>(null);
+  const [cloudLevel, setCloudLevel] = useState<string | null>(null);
+  const [cloudAverage, setCloudAverage] = useState<number | null>(null);
+  const cloudAverageRef = useRef<number | null>(null);
   const idsKey = selectedIds.join(",");
   const { lat, lon } = location;
 
@@ -261,6 +286,33 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
     };
   }, [idsKey]);
 
+  // Cloud-cover summary for the haze + badge (server-side TTL cached).
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch(
+          `/api/sky/clouds?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}`,
+        );
+        const body = await response.json();
+        if (cancelled || !body?.data) {
+          return;
+        }
+        cloudAverageRef.current = body.data.average ?? null;
+        setCloudLevel(body.data.level ?? null);
+        setCloudAverage(body.data.average ?? null);
+      } catch {
+        // Clouds are decorative — fail silently.
+      }
+    };
+    load();
+    const timer = setInterval(load, 5 * 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [lat, lon]);
+
   // Animate at 60fps using the latest data (refs avoid re-running the loop).
   useEffect(() => {
     let frame = 0;
@@ -272,6 +324,7 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
           tles: tlesRef.current,
           tracks: tracksRef.current,
           now: new Date(),
+          cloudAverage: cloudAverageRef.current,
         });
       }
       frame = requestAnimationFrame(draw);
@@ -289,12 +342,33 @@ export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
         <h3 className="text-sm font-semibold tracking-wide text-slate-200 uppercase">
           Live sky radar
         </h3>
-        <span className="ml-auto inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-300/90">
-          <span className="relative flex size-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-            <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+        <span className="ml-auto inline-flex items-center gap-2.5">
+          {cloudLevel && cloudLevel !== "UNKNOWN" && (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+                cloudLevel === "CLEAR"
+                  ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-300"
+                  : cloudLevel === "PARTLY_CLOUDY"
+                    ? "border-sky-400/40 bg-sky-400/10 text-sky-300"
+                    : "border-slate-400/40 bg-slate-400/10 text-slate-300"
+              }`}
+              title={`${cloudAverage ?? "?"}% average cloud cover tonight`}
+            >
+              <Cloud className="size-3" />
+              {cloudLevel === "CLEAR"
+                ? "Clear"
+                : cloudLevel === "PARTLY_CLOUDY"
+                  ? "Partly cloudy"
+                  : "Cloudy"}
+            </span>
+          )}
+          <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-300/90">
+            <span className="relative flex size-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+              <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+            </span>
+            live
           </span>
-          live
         </span>
       </div>
 

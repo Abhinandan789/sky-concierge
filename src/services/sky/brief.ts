@@ -1,16 +1,25 @@
 import type {
   AuroraInfo,
+  CloudSummary,
+  ConjunctionEvent,
   IssPass,
   LatLon,
   MoonInfo,
+  PlanetEvent,
   ShowerInfo,
   SkyBrief,
   SkyBriefError,
 } from "@/types";
 import { computeTonightAurora } from "./aurora";
-import { getCachedKpForecast, getCachedTleSet } from "./cache";
+import {
+  getCachedCloudForecast,
+  getCachedKpForecast,
+  getCachedTleSet,
+} from "./cache";
+import { summarizeCloudCover } from "./clouds";
 import { findSatellitePasses } from "./iss-passes";
-import { computeMoonInfo } from "./moon";
+import { computeMoonInfo, getTonightBounds } from "./moon";
+import { computeMoonConjunctions, computePlanetEvents } from "./planets";
 import { computeShowerStatus } from "./showers";
 
 const DEFAULT_NORAD_IDS = ["25544"];
@@ -60,10 +69,11 @@ export async function buildTonightBrief(
   const now = options.now ?? new Date();
   const errors: SkyBriefError[] = [];
 
-  // --- Satellite passes + aurora, fetched in parallel ---
+  // --- Satellite passes + aurora + clouds, fetched in parallel ---
   let issPasses: IssPass[] = [];
   let aurora: AuroraInfo | null = null;
-  const [passResult, auroraRows] = await Promise.allSettled([
+  let clouds: CloudSummary = { level: "UNKNOWN", average: null, hours: [] };
+  const [passResult, auroraRows, cloudResult] = await Promise.allSettled([
     (async () => {
       const ids = resolveNoradIds(options.noradIds);
       const all: IssPass[] = [];
@@ -81,6 +91,7 @@ export async function buildTonightBrief(
       return all;
     })(),
     getCachedKpForecast(fetcher),
+    getCachedCloudForecast(location.lat, location.lon, fetcher),
   ]);
 
   if (passResult.status === "fulfilled") {
@@ -96,6 +107,17 @@ export async function buildTonightBrief(
       message: errorMessage(auroraRows.reason),
     });
   }
+  if (cloudResult.status === "fulfilled") {
+    const bounds = getTonightBounds(location, now);
+    clouds = bounds
+      ? summarizeCloudCover(cloudResult.value, bounds.start, bounds.end)
+      : { level: "UNKNOWN", average: null, hours: [] };
+  } else {
+    errors.push({
+      section: "clouds",
+      message: errorMessage(cloudResult.reason),
+    });
+  }
 
   // --- Meteor showers ---
   let showers: ShowerInfo[] = [];
@@ -108,6 +130,23 @@ export async function buildTonightBrief(
     errors.push({ section: "showers", message: errorMessage(error) });
   }
 
+  // --- Planets & moon-planet conjunctions (all local math) ---
+  let planets: PlanetEvent[] = [];
+  let conjunctions: ConjunctionEvent[] = [];
+  try {
+    const bounds = getTonightBounds(location, now);
+    if (bounds) {
+      planets = computePlanetEvents(location, bounds.start, bounds.end);
+      conjunctions = computeMoonConjunctions(
+        location,
+        bounds.start,
+        bounds.end,
+      );
+    }
+  } catch (error) {
+    errors.push({ section: "planets", message: errorMessage(error) });
+  }
+
   // --- Moon & viewing window ---
   const moon: MoonInfo = computeMoonInfo(location, now);
 
@@ -118,6 +157,9 @@ export async function buildTonightBrief(
     aurora,
     showers,
     moon,
+    clouds,
+    planets,
+    conjunctions,
     errors,
   };
 }

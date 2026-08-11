@@ -44,6 +44,9 @@ function makeBrief(overrides: Partial<SkyBrief> = {}): SkyBrief {
       moonDownAllNight: false,
       darkHours: 0,
     },
+    clouds: { level: "CLEAR", average: 10, hours: [] },
+    planets: [],
+    conjunctions: [],
     errors: [],
     ...overrides,
   };

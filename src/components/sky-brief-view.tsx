@@ -1,5 +1,7 @@
 import {
+  CloudSun,
   MoonStar,
+  Orbit,
   Satellite,
   Sparkles,
   TriangleAlert,
@@ -14,6 +16,25 @@ import {
 import { buildTonightBrief } from "@/services/sky/brief";
 import type { LatLon } from "@/types";
 import { NightTimeline } from "./night-timeline";
+
+const CLOUD_BADGES: Record<string, { label: string; className: string }> = {
+  CLEAR: {
+    label: "Clear",
+    className: "border-emerald-400/40 bg-emerald-400/10 text-emerald-300",
+  },
+  PARTLY_CLOUDY: {
+    label: "Partly cloudy",
+    className: "border-sky-400/40 bg-sky-400/10 text-sky-300",
+  },
+  CLOUDY: {
+    label: "Cloudy",
+    className: "border-slate-400/40 bg-slate-400/10 text-slate-300",
+  },
+  UNKNOWN: {
+    label: "Unknown",
+    className: "border-slate-600/50 bg-slate-500/10 text-slate-400",
+  },
+};
 
 const AURORA_BADGES: Record<string, { label: string; className: string }> = {
   LOW: {
@@ -79,7 +100,7 @@ export async function SkyBriefSection({
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         {/* Satellite passes */}
         <CardShell
           icon={<Satellite className="size-4.5" />}
@@ -222,6 +243,137 @@ export async function SkyBriefSection({
             quality. Best after midnight.
           </p>
         </CardShell>
+
+        {/* Sky conditions (cloud cover tonight) */}
+        <CardShell
+          icon={<CloudSun className="size-4.5" />}
+          title="Sky Conditions"
+          accent="text-sky-300"
+        >
+          {brief.clouds.level === "UNKNOWN" ? (
+            <p className="text-sm leading-relaxed text-slate-400">
+              No cloud forecast available for tonight.
+            </p>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-slate-300">Tonight</span>
+                <span
+                  className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${CLOUD_BADGES[brief.clouds.level].className}`}
+                >
+                  {CLOUD_BADGES[brief.clouds.level].label}
+                </span>
+              </div>
+
+              {/* Cloud-cover meter 0-100% */}
+              <div>
+                <div className="relative h-2 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-emerald-400 via-sky-400 to-slate-300"
+                    style={{
+                      width: `${Math.min(100, brief.clouds.average ?? 0)}%`,
+                    }}
+                  />
+                </div>
+                <div className="mono mt-1.5 flex justify-between text-[10px] text-slate-500">
+                  <span>clear</span>
+                  <span className="text-sky-300/80">
+                    {brief.clouds.average}% cover
+                  </span>
+                  <span>solid</span>
+                </div>
+              </div>
+
+              <p className="text-sm leading-relaxed text-slate-400">
+                {brief.clouds.level === "CLEAR"
+                  ? "Great transparency — a good night to be outside."
+                  : brief.clouds.level === "CLOUDY"
+                    ? "Thick cloud cover expected — passes and meteors may be hidden."
+                    : "Partly cloudy — keep an eye on gaps for the brightest events."}
+              </p>
+            </div>
+          )}
+        </CardShell>
+      </div>
+
+      {/* Planets tonight */}
+      <div className="glass glass-hover rounded-2xl p-6">
+        <div className="mb-5 flex items-center gap-2.5">
+          <span className="flex size-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-amber-300">
+            <Orbit className="size-4.5" />
+          </span>
+          <h3 className="text-sm font-semibold tracking-wide text-slate-200 uppercase">
+            Planets Tonight
+          </h3>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {brief.planets.map((planet) => (
+            <div
+              key={planet.name}
+              className="rounded-xl border border-white/5 bg-white/[0.03] p-4"
+            >
+              <div className="flex items-baseline justify-between">
+                <span className="text-sm font-semibold text-slate-100">
+                  {planet.name}
+                </span>
+                {planet.visible && planet.magnitude !== null && (
+                  <span className="mono text-xs text-amber-200/90">
+                    mag {planet.magnitude.toFixed(1)}
+                  </span>
+                )}
+              </div>
+              {planet.visible ? (
+                <div className="mt-3 space-y-1 text-xs text-slate-400">
+                  <p>
+                    <span className="text-slate-200">
+                      Peaks {planet.maxAltitudeDeg}°
+                    </span>{" "}
+                    in the {planet.direction}
+                    {planet.bestTime
+                      ? ` at ${formatTime(planet.bestTime, tz)}`
+                      : ""}
+                  </p>
+                  <p className="text-slate-500">
+                    {planet.riseTime
+                      ? `Rises ${formatTime(planet.riseTime, tz)}`
+                      : "Already up when dusk falls"}
+                    {planet.setTime
+                      ? ` · sets ${formatTime(planet.setTime, tz)}`
+                      : " · up past dawn"}
+                  </p>
+                </div>
+              ) : (
+                <p className="mt-3 text-xs text-slate-500">
+                  Not visible tonight from this spot.
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {brief.conjunctions.length > 0 && (
+          <div className="mt-4 rounded-xl border border-fuchsia-400/20 bg-fuchsia-400/5 p-4">
+            <p className="text-[10px] tracking-wide text-fuchsia-300/80 uppercase">
+              Moon meets planet
+            </p>
+            <ul className="mt-2 space-y-1">
+              {brief.conjunctions.map((conjunction) => (
+                <li key={conjunction.planet} className="text-sm text-slate-300">
+                  The Moon passes{" "}
+                  <span className="font-medium text-slate-100">
+                    {conjunction.planet}
+                  </span>{" "}
+                  at {formatTime(conjunction.time, tz)} — only{" "}
+                  <span className="mono font-medium text-fuchsia-300">
+                    {conjunction.separationDeg}°
+                  </span>{" "}
+                  apart. Unmissable.
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
 
       {/* Moon & best viewing window */}
@@ -332,6 +484,7 @@ export async function SkyBriefSection({
         moon={moon}
         passes={brief.issPasses}
         showers={brief.showers}
+        clouds={brief.clouds}
       />
 
       {/* Section footer */}

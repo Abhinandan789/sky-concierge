@@ -21,17 +21,31 @@ map, it's a lightweight "sky concierge" that tells you _when to look up_.
   - **Aurora**: peak predicted Kp for the next 12 hours from NOAA SWPC, with a
     level badge and viewing-latitude hint.
   - **Meteor showers**: countdown to every major shower peak.
+  - **Sky conditions**: tonight's cloud-cover forecast from Open-Meteo (free,
+    no API key) — a Clear / Partly cloudy / Cloudy badge and meter in the
+    brief, an hourly cloud haze overlaid on the night timeline, and a cloud
+    tint + badge on the radar.
   - **Moon & best viewing window**: phase, illumination, rise/set, and the
     longest moon-free window tonight (SunCalc) — "moonless night ✨" when the
     skies stay dark.
+  - **Planets tonight**: Venus, Jupiter, Saturn and Mars — rise/set, peak
+    altitude, visual magnitude and direction for your coordinates
+    (astronomy-engine, all local math), plus **moon-planet conjunctions**
+    when the Moon passes within 8° of a bright planet tonight.
   - **Tonight at a glance** — a night timeline: sunset → sunrise with the
-    moon's up/down periods, pass markers, moonrise/set ticks and a "now"
-    cursor.
+    moon's up/down periods, hourly cloud-cover haze, pass markers,
+    moonrise/set ticks and a "now" cursor.
   - **Live sky radar** — a custom canvas map (no map tiles) centered on your
     location, plotting each tracked satellite's live position and ground
-    track (past 30 min dim, next 90 min bright) with range rings and the
-    horizon circle. TLEs come from the same cache as the brief and are
-    propagated in the browser, so the map animates in real time.
+    track (past 30 min dim, next 90 min bright) with range rings, the
+    horizon circle, and a cloud-cover haze. TLEs come from the same cache as
+    the brief and are propagated in the browser, so the map animates in real
+    time.
+  - **3D sky globe** — a WebGL globe (three.js) with the night-lights Earth
+    texture, starfield, live satellite blips and ground tracks. The globe
+    rotates at Earth's **real sidereal rate**, so you see the planet
+    genuinely revolve beneath the satellites. Drag to orbit, scroll to zoom;
+    lazy-loaded and togglable next to the radar.
   - All times render in **the location's timezone** (derived from lat/lon),
     not the server's.
 - **Location-aware** — "Use my location" button, `?lat=&lon=` in the URL, and
@@ -60,8 +74,10 @@ map, it's a lightweight "sky concierge" that tells you _when to look up_.
   no env vars. The schema is idempotent (`CREATE TABLE IF NOT EXISTS` plus
   column additions for pre-existing databases).
 - **satellite.js** (SGP4 propagation), **SunCalc** (moon/sun), **tz-lookup**
-  (location timezones), **web-push** (Web Push / VAPID), **CelesTrak** (TLEs),
-  **NOAA SWPC** (Kp forecast), **Resend** (email), **Vitest** (tests)
+  (location timezones), **astronomy-engine** (planets & conjunctions),
+  **three.js** (3D globe), **web-push** (Web Push / VAPID), **CelesTrak**
+  (TLEs), **NOAA SWPC** (Kp forecast), **Open-Meteo** (cloud cover),
+  **Resend** (email), **Vitest** (tests)
 
 ## Quick start
 
@@ -127,16 +143,19 @@ src/
   app/            Pages and API routes
     api/sky/brief           GET  tonight's brief for ?lat=&lon=&norad=
     api/sky/tles            GET  TLEs for the live radar (?norad=)
+    api/sky/clouds          GET  tonight's cloud summary for the radar
     api/subscriptions       POST create (double opt-in) / verify / unsubscribe
     api/push-subscriptions  POST/DELETE browser push registrations
     api/push/public-key     GET  VAPID public key for the browser
     verify, unsubscribe     Confirmation / unsubscribe landing pages
     manifest.ts             PWA manifest
   components/     UI (starfield, brief cards, night timeline, live sky radar,
-                  subscribe form, push toggle, locate + remembered-location)
+                  3D sky globe, radar/globe toggle, subscribe form, push
+                  toggle, locate + remembered-location)
   services/
     sky/          Pure sky math & data: TLE fetch (TTL-cached), pass
-                  prediction, aurora, meteor shower calendar, moon & viewing
+                  prediction, aurora, cloud cover (TTL-cached), planets &
+                  conjunctions, meteor shower calendar, moon & viewing
                   window, brief (parallel, cached fetches)
     alerts/       Alert engine: due-alert logic + pluggable sender
                   (Resend email, console fallback), Web Push dispatch,
@@ -169,12 +188,15 @@ Key design choices:
 
 ## Data sources
 
-| Source    | Used for                                | Endpoint                               |
-| --------- | --------------------------------------- | -------------------------------------- |
-| CelesTrak | Satellite TLEs (TTL-cached)             | `gp.php?CATNR=25544`                   |
-| NOAA SWPC | Planetary K-index forecast (TTL-cached) | `noaa-planetary-k-index-forecast.json` |
-| SunCalc   | Moon phase, rise/set, dark windows      | (local computation)                    |
-| Resend    | Alert emails                            | `api.resend.com/emails`                |
+| Source       | Used for                                | Endpoint                               |
+| ------------ | --------------------------------------- | -------------------------------------- |
+| CelesTrak    | Satellite TLEs (TTL-cached)             | `gp.php?CATNR=25544`                   |
+| NOAA SWPC    | Planetary K-index forecast (TTL-cached) | `noaa-planetary-k-index-forecast.json` |
+| Open-Meteo   | Cloud cover (TTL-cached, no API key)    | `api.open-meteo.com/v1/forecast`       |
+| astronomy-   | Planet rise/set, magnitude, conjunctions| (local computation)                    |
+|   engine     |                                       |                                       |
+| SunCalc      | Moon phase, rise/set, dark windows      | (local computation)                    |
+| Resend       | Alert emails                            | `api.resend.com/emails`                |
 
 ## Roadmap
 
@@ -188,4 +210,7 @@ Key design choices:
 - [x] Rate limiting + security headers
 - [x] Satellite picker UI (multiple NORAD IDs)
 - [x] Live sky radar (custom canvas ground-track map)
+- [x] 3D sky globe (three.js, real sidereal rotation)
+- [x] Cloud-cover forecast (Open-Meteo) — brief badge, timeline + radar overlay
+- [x] Planets & moon-planet conjunctions (astronomy-engine)
 - [ ] Deployment (Vercel) + cron for the alert engine

@@ -3,8 +3,8 @@ import { MoonStar, Satellite } from "lucide-react";
 import { Suspense } from "react";
 import { LocateButton } from "@/components/locate-button";
 import { PushNotifications } from "@/components/push-notifications";
-import { SatelliteMap } from "@/components/satellite-map";
 import { SatellitePicker } from "@/components/satellite-picker";
+import { SkyViewSection } from "@/components/sky-view-section";
 import { SkyBriefSection } from "@/components/sky-brief-view";
 import { SubscribeSection } from "@/components/subscribe-form";
 import { parseSatelliteIds } from "@/config/satellites";
@@ -112,12 +112,15 @@ export default async function HomePage({
         </Suspense>
       </section>
 
-      {/* ── Live sky radar ───────────────────────────────────── */}
+      {/* ── Live sky radar / 3D globe ────────────────────────── */}
       <section id="radar" className="mx-auto max-w-5xl scroll-mt-8 px-4 pb-24">
         <h2 className="mb-6 text-center text-2xl font-bold text-slate-100">
           See what&apos;s overhead right now
         </h2>
-        <SatelliteMap location={location} selectedIds={selectedSatelliteIds} />
+        <SkyViewSection
+          location={location}
+          selectedIds={selectedSatelliteIds}
+        />
       </section>
 
       {/* ── Subscribe ────────────────────────────────────────── */}

@@ -70,12 +70,12 @@ describe("GET /api/sky/brief", () => {
     const body = await response.json();
     expect(body.success).toBe(true);
     expect(body.data.location).toEqual({ lat: 40.7, lon: -74 });
-    // Both upstream sections failed but the brief still degraded gracefully.
+    // All upstream sections failed but the brief still degraded gracefully.
     expect(
       body.data.errors
         .map((error: { section: string }) => error.section)
         .sort(),
-    ).toEqual(["aurora", "iss"]);
+    ).toEqual(["aurora", "clouds", "iss"]);
     expect(Array.isArray(body.data.issPasses)).toBe(true);
   });
 

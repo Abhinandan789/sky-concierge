@@ -26,6 +26,11 @@ export const DATA_SOURCES = [
     note: "Aurora / Kp forecast",
   },
   {
+    name: "Open-Meteo",
+    href: "https://open-meteo.com",
+    note: "Cloud cover",
+  },
+  {
     name: "NASA",
     href: "https://api.nasa.gov",
     note: "Astronomical data",
