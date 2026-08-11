@@ -55,9 +55,11 @@ CREATE TABLE IF NOT EXISTS alert_subscriptions (
   events                TEXT NOT NULL DEFAULT 'iss,aurora,showers',
   satellite_ids         TEXT,
   pending_satellite_ids TEXT,
+  pending_lat           REAL,
+  pending_lon           REAL,
   enabled               INTEGER NOT NULL DEFAULT 1,
   created_at            TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(email, lat, lon)
+  UNIQUE(email)
 );
 
 CREATE TABLE IF NOT EXISTS alert_logs (
@@ -163,6 +165,8 @@ export function createSkyDb(path: string): DatabaseSync {
     "pending_satellite_ids",
     "pending_satellite_ids TEXT",
   );
+  ensureColumn(db, "alert_subscriptions", "pending_lat", "pending_lat REAL");
+  ensureColumn(db, "alert_subscriptions", "pending_lon", "pending_lon REAL");
 
   // Existing subscribers predate double opt-in; treat them as verified and
   // give them unsubscribe tokens so links work immediately.
@@ -174,7 +178,71 @@ export function createSkyDb(path: string): DatabaseSync {
      WHERE unsubscribe_token IS NULL OR verify_token IS NULL`,
   );
 
+  migrateToUniqueEmail(db);
+
   return db;
+}
+
+/**
+ * Migrate databases created before subscriptions were unique per email address.
+ *
+ * v0.1–v0.3 keyed subscriptions on (email, lat, lon), so the same address at a
+ * different location silently became a second row — meaning duplicate alert
+ * emails. This rebuilds the table with UNIQUE(email) and keeps a single row per
+ * address: the newest verified one wins (so an owner's confirmed row and its
+ * unsubscribe token survive), otherwise the newest row. Runs only when the
+ * legacy constraint is detected, so it's a no-op for fresh databases.
+ */
+function migrateToUniqueEmail(db: DatabaseSync): void {
+  const table = db
+    .prepare(
+      `SELECT sql FROM sqlite_master
+       WHERE type = 'table' AND name = 'alert_subscriptions'`,
+    )
+    .get() as { sql?: string } | undefined;
+  if (!table?.sql?.includes("UNIQUE(email, lat, lon)")) {
+    return;
+  }
+
+  db.exec(`CREATE TABLE alert_subscriptions_new (
+    id                    TEXT PRIMARY KEY,
+    email                 TEXT NOT NULL,
+    lat                   REAL NOT NULL,
+    lon                   REAL NOT NULL,
+    events                TEXT NOT NULL DEFAULT 'iss,aurora,showers',
+    satellite_ids         TEXT,
+    pending_satellite_ids TEXT,
+    pending_lat           REAL,
+    pending_lon           REAL,
+    enabled               INTEGER NOT NULL DEFAULT 1,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    verified              INTEGER NOT NULL DEFAULT 0,
+    verify_token          TEXT,
+    unsubscribe_token     TEXT,
+    pending_events        TEXT,
+    UNIQUE(email)
+  );`);
+
+  db.exec(`INSERT INTO alert_subscriptions_new
+    SELECT s.id, s.email, s.lat, s.lon, s.events, s.satellite_ids,
+           s.pending_satellite_ids, s.pending_lat, s.pending_lon,
+           s.enabled, s.created_at, s.verified, s.verify_token,
+           s.unsubscribe_token, s.pending_events
+    FROM alert_subscriptions s
+    WHERE s.id = (
+      SELECT s2.id FROM alert_subscriptions s2
+      WHERE s2.email = s.email
+      ORDER BY s2.verified DESC, s2.created_at DESC, s2.id
+      LIMIT 1
+    )`);
+
+  db.exec(`DROP TABLE alert_subscriptions`);
+  db.exec(`ALTER TABLE alert_subscriptions_new RENAME TO alert_subscriptions`);
+
+  // Dropped duplicates leave orphaned log rows behind (foreign keys are off by
+  // default in SQLite); sweep them so alert_logs only ever references live rows.
+  db.exec(`DELETE FROM alert_logs
+    WHERE subscription_id NOT IN (SELECT id FROM alert_subscriptions)`);
 }
 
 const globalForDb = globalThis as unknown as {
@@ -219,15 +287,17 @@ export interface UpsertSubscriptionResult {
 }
 
 /**
- * Create or refresh a subscription for (email, lat, lon). Returns the
- * subscription id — the same id on re-subscribe, so no duplicates.
+ * Create or refresh the subscription for an email address. Returns the
+ * subscription id — the same id on re-subscribe at any location, so an
+ * address never ends up with two rows (and thus two sets of alert emails).
  *
  * Security model for unverified re-submits (double opt-in): a request that
- * isn't verified may never mutate an already-verified row's events or
- * enabled state. Instead the requested events are parked in pending_events
- * and applied only after the owner confirms via email. An attacker who
- * knows an address + coordinates can therefore neither re-enable an
- * opted-out subscription nor change which alerts the owner receives.
+ * isn't verified may never mutate an already-verified row's events, location
+ * or enabled state. Instead the requested changes are parked in the pending_*
+ * columns and applied only after the owner confirms via email. An attacker
+ * who knows an address can therefore neither re-enable an opted-out
+ * subscription, move it to a new location, nor change which alerts the owner
+ * receives.
  */
 export function upsertSubscription(
   db: DatabaseSync,
@@ -242,9 +312,22 @@ export function upsertSubscription(
   db.prepare(
     `INSERT INTO alert_subscriptions
        (id, email, lat, lon, events, satellite_ids, enabled, verified,
-        verify_token, unsubscribe_token, pending_events, pending_satellite_ids)
-     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, NULL)
-     ON CONFLICT(email, lat, lon) DO UPDATE SET
+        verify_token, unsubscribe_token, pending_events, pending_satellite_ids,
+        pending_lat, pending_lon)
+     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, NULL, NULL, NULL)
+     ON CONFLICT(email) DO UPDATE SET
+       -- Verified requests (console mode) and pending rows move the location
+       -- in place; unverified re-submits of a verified row leave it parked.
+       lat = CASE
+         WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0
+           THEN excluded.lat
+           ELSE alert_subscriptions.lat
+       END,
+       lon = CASE
+         WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0
+           THEN excluded.lon
+           ELSE alert_subscriptions.lon
+       END,
        verified = MAX(alert_subscriptions.verified, excluded.verified),
        verify_token = excluded.verify_token,
        -- A verified row keeps its unsubscribe token: an unverified re-submit
@@ -254,7 +337,6 @@ export function upsertSubscription(
            THEN alert_subscriptions.unsubscribe_token
            ELSE excluded.unsubscribe_token
        END,
-       -- Verified requests (console mode) and pending rows apply immediately.
        events = CASE
          WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0
            THEN excluded.events
@@ -271,7 +353,7 @@ export function upsertSubscription(
            ELSE alert_subscriptions.enabled
        END,
        -- Park changes to a verified row until the owner confirms: different
-       -- events, different satellites, or a re-enable request against an
+       -- events, satellites or location, or a re-enable request against an
        -- opted-out subscription. NULL vs NULL never parks (IS NOT is false).
        pending_events = CASE
          WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0 THEN NULL
@@ -284,6 +366,16 @@ export function upsertSubscription(
          WHEN excluded.satellite_ids IS NOT alert_subscriptions.satellite_ids
            THEN excluded.satellite_ids
          ELSE alert_subscriptions.pending_satellite_ids
+       END,
+       pending_lat = CASE
+         WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0 THEN NULL
+         WHEN excluded.lat != alert_subscriptions.lat THEN excluded.lat
+         ELSE alert_subscriptions.pending_lat
+       END,
+       pending_lon = CASE
+         WHEN excluded.verified = 1 OR alert_subscriptions.verified = 0 THEN NULL
+         WHEN excluded.lon != alert_subscriptions.lon THEN excluded.lon
+         ELSE alert_subscriptions.pending_lon
        END`,
   ).run(
     randomUUID(),
@@ -300,10 +392,11 @@ export function upsertSubscription(
   const row = db
     .prepare(
       `SELECT id, verified, verify_token, unsubscribe_token, pending_events,
-              pending_satellite_ids
-       FROM alert_subscriptions WHERE email = ? AND lat = ? AND lon = ?`,
+              pending_satellite_ids, pending_lat AS pendingLat,
+              pending_lon AS pendingLon
+       FROM alert_subscriptions WHERE email = ?`,
     )
-    .get(email, lat, lon) as
+    .get(email) as
     | {
         id: string;
         verified: number;
@@ -311,6 +404,8 @@ export function upsertSubscription(
         unsubscribe_token: string;
         pending_events: string | null;
         pending_satellite_ids: string | null;
+        pendingLat: number | null;
+        pendingLon: number | null;
       }
     | undefined;
 
@@ -323,7 +418,10 @@ export function upsertSubscription(
     verifyToken: row.verify_token,
     unsubscribeToken: row.unsubscribe_token,
     pendingChange:
-      row.pending_events !== null || row.pending_satellite_ids !== null,
+      row.pending_events !== null ||
+      row.pending_satellite_ids !== null ||
+      row.pendingLat !== null ||
+      row.pendingLon !== null,
   };
 }
 
@@ -356,19 +454,24 @@ export function disableSubscription(db: DatabaseSync, token: string): boolean {
 
 /**
  * Confirm a subscription's email by its verification token. Also applies any
- * pending events (an unverified re-submit's requested changes) — the owner
- * confirming the email is the authorization for those mutations.
+ * pending changes (events, satellites or location from an unverified
+ * re-submit) — the owner confirming the email is the authorization for those
+ * mutations.
  */
 export function verifySubscription(db: DatabaseSync, token: string): boolean {
   const result = db
     .prepare(
       `UPDATE alert_subscriptions
        SET verified = 1,
+           lat = COALESCE(pending_lat, lat),
+           lon = COALESCE(pending_lon, lon),
            events = COALESCE(pending_events, events),
            satellite_ids = COALESCE(pending_satellite_ids, satellite_ids),
            enabled = 1,
            pending_events = NULL,
-           pending_satellite_ids = NULL
+           pending_satellite_ids = NULL,
+           pending_lat = NULL,
+           pending_lon = NULL
        WHERE verify_token = ?`,
     )
     .run(token);
