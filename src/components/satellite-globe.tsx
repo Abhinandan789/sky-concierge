@@ -29,6 +29,10 @@ interface SatelliteGlobeProps {
 const SIDEREAL_RATE = (2 * Math.PI) / 86164.0905;
 const EARTH_RADIUS_KM = 6371;
 const TRACK_REFRESH_MS = 60_000;
+/** Lift applied to ground tracks so they don't z-fight the surface. */
+const TRACK_LIFT_KM = 10;
+/** World-space height of a label pill (globe radius = 1). */
+const LABEL_HEIGHT = 0.16;
 const COLORS = ["#22d3ee", "#fbbf24", "#e879f9", "#34d399"];
 
 /** Earth-fixed lat/lon (+ altitude) → position inside the globe group. */
@@ -79,63 +83,122 @@ function makeGlowSprite(color: string): THREE.Sprite {
       depthWrite: false,
     }),
   );
-  sprite.scale.set(0.09, 0.09, 1);
   return sprite;
 }
 
 /**
- * Compact "pill tag" label: a rounded dark backdrop with a colored border,
- * drawn on an oversized canvas so long satellite names never truncate. The
- * sprite is small relative to the globe (~1/6 of its radius) — the previous
- * version rendered as oversized floating text.
+ * Glass-style "pill tag" label, cropped exactly to its own size so the text
+ * renders crisp (no aspect distortion — the previous version stretched the
+ * canvas, which is what made it look cheap). A colored dot ties the tag to
+ * the satellite's track color, and a callout tail points down at the blip.
  */
 function makeLabelSprite(text: string, color: string): THREE.Sprite {
   const font = "600 30px ui-sans-serif, system-ui, sans-serif";
+  const measure = document.createElement("canvas").getContext("2d")!;
+  measure.font = font;
+  const textWidth = measure.measureText(text).width;
+
+  const pillHeight = 54;
+  const dotRadius = 6;
+  const dotPadLeft = 22; // dot + spacing before the text
+  const tailSize = 7;
+  const pillWidth = Math.ceil(textWidth + dotPadLeft + 26);
   const canvas = document.createElement("canvas");
-  // Oversized so measured text always fits; transparent margins are cropped
-  // visually by keeping the sprite box proportional to the drawn pill.
-  canvas.width = 512;
-  canvas.height = 96;
+  canvas.width = pillWidth;
+  canvas.height = pillHeight + tailSize;
   const ctx = canvas.getContext("2d")!;
-  ctx.font = font;
-  const textWidth = ctx.measureText(text).width;
-  const padX = 24;
-  const pillWidth = Math.min(500, textWidth + padX * 2);
-  const pillHeight = 60;
-  const x = (canvas.width - pillWidth) / 2;
-  const y = (canvas.height - pillHeight) / 2;
-
-  // Rounded pill backdrop (dark navy, matches the app's cards).
   const radius = pillHeight / 2;
-  ctx.beginPath();
-  ctx.moveTo(x + radius, y);
-  ctx.lineTo(x + pillWidth - radius, y);
-  ctx.arcTo(x + pillWidth, y, x + pillWidth, y + radius, radius);
-  ctx.lineTo(x + pillWidth, y + pillHeight - radius);
-  ctx.arcTo(
-    x + pillWidth,
-    y + pillHeight,
-    x + pillWidth - radius,
-    y + pillHeight,
-    radius,
-  );
-  ctx.lineTo(x + radius, y + pillHeight);
-  ctx.arcTo(x, y + pillHeight, x, y + pillHeight - radius, radius);
-  ctx.lineTo(x, y + radius);
-  ctx.arcTo(x, y, x + radius, y, radius);
-  ctx.closePath();
-  ctx.fillStyle = "rgba(6, 10, 24, 0.82)";
-  ctx.fill();
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = color;
-  ctx.stroke();
 
-  // Label text (white on the dark pill).
+  // Soft drop shadow so the tag lifts off the starfield (like the app cards).
+  ctx.shadowColor = "rgba(0, 0, 0, 0.6)";
+  ctx.shadowBlur = 16;
+  ctx.shadowOffsetY = 5;
+
+  // Pill backdrop: subtle vertical gradient (dark navy → deeper).
+  const gradient = ctx.createLinearGradient(0, 0, 0, pillHeight);
+  gradient.addColorStop(0, "rgba(30, 38, 66, 0.97)");
+  gradient.addColorStop(1, "rgba(9, 13, 30, 0.97)");
+  ctx.beginPath();
+  ctx.moveTo(radius, 0);
+  ctx.lineTo(pillWidth - radius, 0);
+  ctx.arcTo(pillWidth, 0, pillWidth, radius, radius);
+  ctx.lineTo(pillWidth, pillHeight - radius);
+  ctx.arcTo(pillWidth, pillHeight, pillWidth - radius, pillHeight, radius);
+  ctx.lineTo(radius, pillHeight);
+  ctx.arcTo(0, pillHeight, 0, pillHeight - radius, radius);
+  ctx.lineTo(0, radius);
+  ctx.arcTo(0, 0, radius, 0, radius);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+  ctx.shadowColor = "transparent";
+
+  // Thin colored border.
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(radius, 1);
+  ctx.lineTo(pillWidth - radius, 1);
+  ctx.arcTo(pillWidth - 1, 1, pillWidth - 1, radius, radius - 1);
+  ctx.lineTo(pillWidth - 1, pillHeight - radius);
+  ctx.arcTo(
+    pillWidth - 1,
+    pillHeight - 1,
+    pillWidth - radius,
+    pillHeight - 1,
+    radius - 1,
+  );
+  ctx.lineTo(radius, pillHeight - 1);
+  ctx.arcTo(1, pillHeight - 1, 1, pillHeight - radius, radius - 1);
+  ctx.lineTo(1, radius);
+  ctx.arcTo(1, 1, radius, 1, radius - 1);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  // Colored dot matching the satellite's track color.
+  ctx.beginPath();
+  ctx.arc(
+    dotPadLeft / 2 + dotRadius / 2,
+    pillHeight / 2,
+    dotRadius,
+    0,
+    Math.PI * 2,
+  );
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 10;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Label text with a subtle shadow for readability.
   ctx.font = font;
-  ctx.fillStyle = "#e2e8f0";
-  ctx.textAlign = "center";
+  ctx.shadowColor = "rgba(0, 0, 0, 0.8)";
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = "#eef2ff";
+  ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 1);
+  ctx.fillText(text, dotPadLeft + dotRadius, pillHeight / 2 + 1);
+  ctx.shadowBlur = 0;
+
+  // Callout tail pointing down at the satellite.
+  ctx.beginPath();
+  ctx.moveTo(pillWidth / 2 - tailSize, pillHeight);
+  ctx.lineTo(pillWidth / 2, pillHeight + tailSize);
+  ctx.lineTo(pillWidth / 2 + tailSize, pillHeight);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(9, 13, 30, 0.97)";
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.55;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(pillWidth / 2 - tailSize, pillHeight - 0.5);
+  ctx.lineTo(pillWidth / 2, pillHeight + tailSize - 1);
+  ctx.lineTo(pillWidth / 2 + tailSize, pillHeight - 0.5);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
 
   const texture = new THREE.CanvasTexture(canvas);
   const sprite = new THREE.Sprite(
@@ -146,41 +209,85 @@ function makeLabelSprite(text: string, color: string): THREE.Sprite {
       depthTest: true,
     }),
   );
-  // World-space size: ~0.15 of the globe radius tall, width proportional to
-  // the text so tags stay tidy next to the blips.
-  const height = 0.15;
-  sprite.scale.set((pillWidth / pillHeight) * height, height, 1);
+  // Anchor the sprite's bottom-center (the tail) at the satellite position.
+  sprite.center.set(0.5, 0);
+  sprite.scale.set(
+    (canvas.width / canvas.height) * LABEL_HEIGHT,
+    LABEL_HEIGHT,
+    1,
+  );
   return sprite;
 }
 
-/** A polyline on the globe surface (slightly lifted to avoid z-fighting). */
-function buildTrackLine(
-  points: GroundTrackPoint[],
-  color: string,
-  opacity: number,
-): THREE.Line {
-  const positions = new Float32Array(points.length * 3);
-  points.forEach((point, index) => {
-    const v = latLonAltToVector3(point.lat, point.lon, 10);
-    positions[index * 3] = v.x;
-    positions[index * 3 + 1] = v.y;
-    positions[index * 3 + 2] = v.z;
-  });
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  return new THREE.Line(
-    geometry,
-    new THREE.LineBasicMaterial({ color, transparent: true, opacity }),
-  );
+/** Everything the animation loop needs for one tracked satellite. */
+interface GlobeSatellite {
+  tle: TleEntry;
+  /** Track sample times (ms), precomputed. */
+  times: number[];
+  /** Past line draws [0..k), future line draws [k..n) — separate geometries
+   * so each keeps its own draw range and boundary vertex. */
+  pastGeometry: THREE.BufferGeometry;
+  futureGeometry: THREE.BufferGeometry;
+  pastLine: THREE.Line;
+  futureLine: THREE.Line;
+  /** Live dot: hot white core + pulsing colored halo. */
+  core: THREE.Sprite;
+  halo: THREE.Sprite;
+  label: THREE.Sprite;
 }
 
-/** Everything the animation loop + the React component need to drive. */
+/** Build a satellite's scene objects from its TLE. */
+function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
+  const color = COLORS[index % COLORS.length];
+  const track = computeGroundTrack(tle.line1, tle.line2);
+  const times = track.map((point) => point.time);
+  const makeGeometry = () => {
+    const positions = new Float32Array(track.length * 3);
+    track.forEach((point: GroundTrackPoint, i: number) => {
+      const v = latLonAltToVector3(point.lat, point.lon, TRACK_LIFT_KM);
+      positions[i * 3] = v.x;
+      positions[i * 3 + 1] = v.y;
+      positions[i * 3 + 2] = v.z;
+    });
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    return geometry;
+  };
+  const pastGeometry = makeGeometry();
+  const futureGeometry = makeGeometry();
+  const pastLine = new THREE.Line(
+    pastGeometry,
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.3 }),
+  );
+  const futureLine = new THREE.Line(
+    futureGeometry,
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 }),
+  );
+
+  const core = makeGlowSprite(color);
+  core.scale.set(0.075, 0.075, 1);
+  const halo = makeGlowSprite(color);
+  halo.scale.set(0.22, 0.22, 1);
+  const label = makeLabelSprite(tle.name, color);
+
+  return {
+    tle,
+    times,
+    pastGeometry,
+    futureGeometry,
+    pastLine,
+    futureLine,
+    core,
+    halo,
+    label,
+  };
+}
+
+/** Everything the React component needs to drive the scene. */
 interface GlobeView {
   scene: THREE.Scene;
   earthGroup: THREE.Group;
-  /** Replace the satellite set: tracks, blips and labels. */
   updateSatellites: (tles: TleEntry[]) => void;
-  /** Move (or create) the observer marker at a lat/lon. */
   updateObserver: (lat: number, lon: number) => void;
   dispose: () => void;
 }
@@ -263,53 +370,42 @@ function createGlobeView(container: HTMLDivElement): GlobeView {
   scene.add(earthGroup);
 
   // Shared mutable satellite state read by the animation loop.
-  const blips = new Map<string, THREE.Sprite>();
-  const labels = new Map<string, THREE.Sprite>();
-  const tlesByNorad = new Map<string, TleEntry>();
+  const sats = new Map<string, GlobeSatellite>();
   let youGlow: THREE.Sprite | null = null;
   let youLabel: THREE.Sprite | null = null;
 
   const updateSatellites = (tles: TleEntry[]) => {
-    const removeSprite = (sprite: THREE.Sprite) => {
-      sprite.parent?.remove(sprite);
-      (sprite.material as THREE.SpriteMaterial).map?.dispose();
-      sprite.material.dispose();
-    };
-    for (const blip of blips.values()) {
-      removeSprite(blip);
+    for (const sat of sats.values()) {
+      earthGroup.remove(
+        sat.pastLine,
+        sat.futureLine,
+        sat.core,
+        sat.halo,
+        sat.label,
+      );
+      sat.pastGeometry.dispose();
+      sat.futureGeometry.dispose();
+      (sat.pastLine.material as THREE.Material).dispose();
+      (sat.futureLine.material as THREE.Material).dispose();
+      (sat.core.material as THREE.SpriteMaterial).map?.dispose();
+      (sat.core.material as THREE.Material).dispose();
+      (sat.halo.material as THREE.SpriteMaterial).map?.dispose();
+      (sat.halo.material as THREE.Material).dispose();
+      (sat.label.material as THREE.SpriteMaterial).map?.dispose();
+      (sat.label.material as THREE.Material).dispose();
     }
-    for (const label of labels.values()) {
-      removeSprite(label);
-    }
-    blips.clear();
-    labels.clear();
-    tlesByNorad.clear();
+    sats.clear();
 
     tles.forEach((tle, index) => {
-      tlesByNorad.set(tle.noradId, tle);
-      const color = COLORS[index % COLORS.length];
-      const track = computeGroundTrack(tle.line1, tle.line2);
-      const nowMs = Date.now();
+      const sat = buildSatellite(tle, index);
       earthGroup.add(
-        buildTrackLine(
-          track.filter((point) => point.time <= nowMs),
-          color,
-          0.3,
-        ),
+        sat.pastLine,
+        sat.futureLine,
+        sat.core,
+        sat.halo,
+        sat.label,
       );
-      earthGroup.add(
-        buildTrackLine(
-          track.filter((point) => point.time > nowMs),
-          color,
-          0.85,
-        ),
-      );
-      const blip = makeGlowSprite(color);
-      earthGroup.add(blip);
-      blips.set(tle.noradId, blip);
-      const label = makeLabelSprite(tle.name, color);
-      earthGroup.add(label);
-      labels.set(tle.noradId, label);
+      sats.set(tle.noradId, sat);
     });
   };
 
@@ -325,12 +421,11 @@ function createGlobeView(container: HTMLDivElement): GlobeView {
       youLabel.material.dispose();
     }
     youGlow = makeGlowSprite("#67e8f9");
-    youGlow.scale.set(0.05, 0.05, 1);
+    youGlow.scale.set(0.055, 0.055, 1);
     youGlow.position.copy(latLonAltToVector3(lat, lon, 0));
     earthGroup.add(youGlow);
     youLabel = makeLabelSprite("You", "#67e8f9");
     youLabel.position.copy(latLonAltToVector3(lat, lon, 0));
-    youLabel.position.y += 0.11;
     earthGroup.add(youLabel);
   };
 
@@ -343,23 +438,62 @@ function createGlobeView(container: HTMLDivElement): GlobeView {
     // inertial space, so the planet genuinely revolves beneath them.
     earthGroup.rotation.y += SIDEREAL_RATE * delta;
 
-    const now = new Date();
-    for (const [noradId, blip] of blips) {
-      const tle = tlesByNorad.get(noradId);
-      const label = labels.get(noradId);
-      if (!tle) {
+    const nowMs = Date.now();
+    const now = new Date(nowMs);
+
+    for (const sat of sats.values()) {
+      const point = currentGroundPoint(sat.tle.line1, sat.tle.line2, now);
+      if (!point) {
         continue;
       }
-      const point = currentGroundPoint(tle.line1, tle.line2, now);
-      if (point) {
-        blip.position.copy(
-          latLonAltToVector3(point.lat, point.lon, point.altitudeKm),
-        );
-        if (label) {
-          label.position.copy(blip.position);
-          label.position.y += 0.12;
-        }
+      // Live dot — at the satellite's real altitude, directly above its
+      // ground point.
+      const blipPos = latLonAltToVector3(
+        point.lat,
+        point.lon,
+        point.altitudeKm,
+      );
+      sat.core.position.copy(blipPos);
+      sat.halo.position.copy(blipPos);
+      sat.label.position.copy(blipPos);
+
+      // Pulse the halo so the satellite reads as a live beacon.
+      const pulse = 0.5 + 0.5 * Math.sin(nowMs / 280);
+      const haloScale = 0.22 + 0.07 * pulse;
+      sat.halo.scale.set(haloScale, haloScale, 1);
+      (sat.halo.material as THREE.SpriteMaterial).opacity = 0.3 + 0.5 * pulse;
+
+      // Re-anchor the ground track to the live position every frame: the
+      // split index moves forward in time and the boundary vertices are
+      // overwritten with the live point, so both line tips always meet the
+      // dot exactly (no more drift between refreshes).
+      const split = sat.times.findIndex((time) => time > nowMs);
+      const k = split === -1 ? sat.times.length : split;
+      const surface = latLonAltToVector3(point.lat, point.lon, TRACK_LIFT_KM);
+      const pastPositions = sat.pastGeometry.attributes.position
+        .array as Float32Array;
+      const futurePositions = sat.futureGeometry.attributes.position
+        .array as Float32Array;
+      if (k < sat.times.length) {
+        pastPositions[k * 3] = surface.x;
+        pastPositions[k * 3 + 1] = surface.y;
+        pastPositions[k * 3 + 2] = surface.z;
+        futurePositions[k * 3] = surface.x;
+        futurePositions[k * 3 + 1] = surface.y;
+        futurePositions[k * 3 + 2] = surface.z;
       }
+      if (k > 0) {
+        pastPositions[(k - 1) * 3] = surface.x;
+        pastPositions[(k - 1) * 3 + 1] = surface.y;
+        pastPositions[(k - 1) * 3 + 2] = surface.z;
+        futurePositions[(k - 1) * 3] = surface.x;
+        futurePositions[(k - 1) * 3 + 1] = surface.y;
+        futurePositions[(k - 1) * 3 + 2] = surface.z;
+      }
+      sat.pastGeometry.attributes.position.needsUpdate = true;
+      sat.futureGeometry.attributes.position.needsUpdate = true;
+      sat.pastGeometry.setDrawRange(0, k);
+      sat.futureGeometry.setDrawRange(k, sat.times.length - k);
     }
 
     controls.update();
@@ -533,8 +667,8 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
         <div className="w-full max-w-xs space-y-3 lg:pt-1">
           <p className="text-xs leading-relaxed text-slate-500">
             The globe spins at Earth&apos;s real rate — satellites orbit in
-            fixed space, so you see the planet revolve beneath them. Ground
-            tracks around{" "}
+            fixed space, so you see the planet revolve beneath them. The pulsing
+            dot is the satellite&apos;s live position; ground tracks around{" "}
             <span className="text-slate-300">
               {formatCoordinates(lat, lon)}
             </span>
