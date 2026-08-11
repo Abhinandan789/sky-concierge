@@ -5,6 +5,7 @@ import {
   computeGroundTrack,
   currentGroundPoint,
   horizonRadiusKm,
+  observerLookAngles,
   splitTrackAt,
   toLocalKm,
 } from "./satellite-map";
@@ -55,6 +56,49 @@ describe("computeGroundTrack", () => {
     expect(current).not.toBeNull();
     expect(Math.abs(current!.lat)).toBeLessThanOrEqual(90);
     expect(current!.altitudeKm).toBeGreaterThan(100);
+  });
+});
+
+describe("observerLookAngles", () => {
+  it("returns sane elevation/azimuth/range for a real TLE", () => {
+    const look = observerLookAngles(
+      ISS_TLE.line1,
+      ISS_TLE.line2,
+      NYC,
+      FIXED_NOW,
+    );
+    expect(look).not.toBeNull();
+    expect(look!.elevationDeg).toBeGreaterThanOrEqual(-90);
+    expect(look!.elevationDeg).toBeLessThanOrEqual(90);
+    expect(look!.azimuthDeg).toBeGreaterThanOrEqual(0);
+    expect(look!.azimuthDeg).toBeLessThan(360);
+    expect(look!.rangeKm).toBeGreaterThan(100); // in orbit
+  });
+
+  it("sees the satellite near the zenith when the observer is below it", () => {
+    const point = currentGroundPoint(ISS_TLE.line1, ISS_TLE.line2, FIXED_NOW);
+    expect(point).not.toBeNull();
+    const look = observerLookAngles(
+      ISS_TLE.line1,
+      ISS_TLE.line2,
+      { lat: point!.lat, lon: point!.lon },
+      FIXED_NOW,
+    );
+    expect(look).not.toBeNull();
+    expect(look!.elevationDeg).toBeGreaterThan(60);
+  });
+
+  it("normalizes azimuth into 0–360", () => {
+    for (let i = 0; i < 5; i += 1) {
+      const look = observerLookAngles(
+        ISS_TLE.line1,
+        ISS_TLE.line2,
+        NYC,
+        FIXED_NOW,
+      );
+      expect(look!.azimuthDeg).toBeGreaterThanOrEqual(0);
+      expect(look!.azimuthDeg).toBeLessThan(360);
+    }
   });
 });
 

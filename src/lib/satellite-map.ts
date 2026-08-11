@@ -92,6 +92,80 @@ export function currentGroundPoint(
   };
 }
 
+export interface SatelliteTelemetry {
+  lat: number;
+  lon: number;
+  /** Height above the ellipsoid, km. */
+  altitudeKm: number;
+  /** Orbital speed, km/s. */
+  speedKmS: number;
+}
+
+/**
+ * Live position + speed for a TLE — used by the globe's hover tooltip and
+ * the radar's readout. LEO satellites travel ~7.7 km/s.
+ */
+export function currentSatelliteTelemetry(
+  line1: string,
+  line2: string,
+  now: Date = new Date(),
+): SatelliteTelemetry | null {
+  const satrec = satellite.twoline2satrec(line1, line2);
+  const pv = satellite.propagate(satrec, now);
+  if (typeof pv.position === "boolean" || typeof pv.velocity === "boolean") {
+    return null;
+  }
+  const gmst = satellite.gstime(now);
+  const geodetic = satellite.eciToGeodetic(pv.position, gmst);
+  return {
+    lat: satellite.degreesLat(geodetic.latitude),
+    lon: satellite.degreesLong(geodetic.longitude),
+    altitudeKm: geodetic.height,
+    speedKmS: Math.hypot(pv.velocity.x, pv.velocity.y, pv.velocity.z),
+  };
+}
+
+export interface ObserverLookAngles {
+  /** Degrees above the observer's horizon (negative = below). */
+  elevationDeg: number;
+  /** Degrees clockwise from north, 0–360. */
+  azimuthDeg: number;
+  /** Straight-line distance, km. */
+  rangeKm: number;
+}
+
+/**
+ * Elevation, azimuth and range of a satellite as seen from an observer — the
+ * numbers the globe's detail panel and compass show. Elevation > 0 means the
+ * satellite is above the observer's horizon.
+ */
+export function observerLookAngles(
+  line1: string,
+  line2: string,
+  observer: LatLon,
+  now: Date = new Date(),
+): ObserverLookAngles | null {
+  const satrec = satellite.twoline2satrec(line1, line2);
+  const pv = satellite.propagate(satrec, now);
+  if (typeof pv.position === "boolean") {
+    return null;
+  }
+  const positionEcf = satellite.eciToEcf(pv.position, satellite.gstime(now));
+  const look = satellite.ecfToLookAngles(
+    {
+      longitude: (observer.lon * Math.PI) / 180,
+      latitude: (observer.lat * Math.PI) / 180,
+      height: 0.1, // km
+    },
+    positionEcf,
+  );
+  return {
+    elevationDeg: (look.elevation * 180) / Math.PI,
+    azimuthDeg: ((look.azimuth * 180) / Math.PI + 360) % 360,
+    rangeKm: look.rangeSat,
+  };
+}
+
 /**
  * Project a lat/lon to a flat local map centered on the observer: north/east
  * offsets in km (equirectangular approximation — accurate enough for a few

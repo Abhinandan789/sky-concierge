@@ -6,11 +6,14 @@ import { formatCoordinates } from "@/lib/utils";
 import {
   computeGroundTrack,
   currentGroundPoint,
+  currentSatelliteTelemetry,
+  observerLookAngles,
   type GroundTrackPoint,
 } from "@/lib/satellite-map";
 import type { LatLon } from "@/types";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { SatelliteGlobeHud } from "./satellite-globe-hud";
 
 interface TleEntry {
   noradId: string;
@@ -31,9 +34,25 @@ const EARTH_RADIUS_KM = 6371;
 const TRACK_REFRESH_MS = 60_000;
 /** Lift applied to ground tracks so they don't z-fight the surface. */
 const TRACK_LIFT_KM = 10;
-/** World-space height of a label pill (globe radius = 1). */
-const LABEL_HEIGHT = 0.16;
 const COLORS = ["#22d3ee", "#fbbf24", "#e879f9", "#34d399"];
+/** How often telemetry (altitude/velocity/elevation) reaches the HUD. */
+const TELEMETRY_INTERVAL_MS = 500;
+/** Pointer movement (px) under which a press counts as a click, not a drag. */
+const CLICK_SLOP_PX = 6;
+
+/** Live numbers for one satellite, pushed to the HUD panels. */
+export interface GlobeSatelliteTelemetry {
+  altitudeKm: number;
+  speedKmS: number;
+  elevationDeg: number;
+  azimuthDeg: number;
+  inView: boolean;
+}
+
+export interface GlobeTelemetry {
+  /** Keyed by NORAD id. */
+  sats: Record<string, GlobeSatelliteTelemetry>;
+}
 
 /** Earth-fixed lat/lon (+ altitude) → position inside the globe group. */
 function latLonAltToVector3(
@@ -86,139 +105,6 @@ function makeGlowSprite(color: string): THREE.Sprite {
   return sprite;
 }
 
-/**
- * Glass-style "pill tag" label, cropped exactly to its own size so the text
- * renders crisp (no aspect distortion — the previous version stretched the
- * canvas, which is what made it look cheap). A colored dot ties the tag to
- * the satellite's track color, and a callout tail points down at the blip.
- */
-function makeLabelSprite(text: string, color: string): THREE.Sprite {
-  const font = "600 30px ui-sans-serif, system-ui, sans-serif";
-  const measure = document.createElement("canvas").getContext("2d")!;
-  measure.font = font;
-  const textWidth = measure.measureText(text).width;
-
-  const pillHeight = 54;
-  const dotRadius = 6;
-  const dotPadLeft = 22; // dot + spacing before the text
-  const tailSize = 7;
-  const pillWidth = Math.ceil(textWidth + dotPadLeft + 26);
-  const canvas = document.createElement("canvas");
-  canvas.width = pillWidth;
-  canvas.height = pillHeight + tailSize;
-  const ctx = canvas.getContext("2d")!;
-  const radius = pillHeight / 2;
-
-  // Soft drop shadow so the tag lifts off the starfield (like the app cards).
-  ctx.shadowColor = "rgba(0, 0, 0, 0.6)";
-  ctx.shadowBlur = 16;
-  ctx.shadowOffsetY = 5;
-
-  // Pill backdrop: subtle vertical gradient (dark navy → deeper).
-  const gradient = ctx.createLinearGradient(0, 0, 0, pillHeight);
-  gradient.addColorStop(0, "rgba(30, 38, 66, 0.97)");
-  gradient.addColorStop(1, "rgba(9, 13, 30, 0.97)");
-  ctx.beginPath();
-  ctx.moveTo(radius, 0);
-  ctx.lineTo(pillWidth - radius, 0);
-  ctx.arcTo(pillWidth, 0, pillWidth, radius, radius);
-  ctx.lineTo(pillWidth, pillHeight - radius);
-  ctx.arcTo(pillWidth, pillHeight, pillWidth - radius, pillHeight, radius);
-  ctx.lineTo(radius, pillHeight);
-  ctx.arcTo(0, pillHeight, 0, pillHeight - radius, radius);
-  ctx.lineTo(0, radius);
-  ctx.arcTo(0, 0, radius, 0, radius);
-  ctx.closePath();
-  ctx.fillStyle = gradient;
-  ctx.fill();
-  ctx.shadowColor = "transparent";
-
-  // Thin colored border.
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = color;
-  ctx.globalAlpha = 0.8;
-  ctx.beginPath();
-  ctx.moveTo(radius, 1);
-  ctx.lineTo(pillWidth - radius, 1);
-  ctx.arcTo(pillWidth - 1, 1, pillWidth - 1, radius, radius - 1);
-  ctx.lineTo(pillWidth - 1, pillHeight - radius);
-  ctx.arcTo(
-    pillWidth - 1,
-    pillHeight - 1,
-    pillWidth - radius,
-    pillHeight - 1,
-    radius - 1,
-  );
-  ctx.lineTo(radius, pillHeight - 1);
-  ctx.arcTo(1, pillHeight - 1, 1, pillHeight - radius, radius - 1);
-  ctx.lineTo(1, radius);
-  ctx.arcTo(1, 1, radius, 1, radius - 1);
-  ctx.closePath();
-  ctx.stroke();
-  ctx.globalAlpha = 1;
-
-  // Colored dot matching the satellite's track color.
-  ctx.beginPath();
-  ctx.arc(
-    dotPadLeft / 2 + dotRadius / 2,
-    pillHeight / 2,
-    dotRadius,
-    0,
-    Math.PI * 2,
-  );
-  ctx.fillStyle = color;
-  ctx.shadowColor = color;
-  ctx.shadowBlur = 10;
-  ctx.fill();
-  ctx.shadowBlur = 0;
-
-  // Label text with a subtle shadow for readability.
-  ctx.font = font;
-  ctx.shadowColor = "rgba(0, 0, 0, 0.8)";
-  ctx.shadowBlur = 6;
-  ctx.fillStyle = "#eef2ff";
-  ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, dotPadLeft + dotRadius, pillHeight / 2 + 1);
-  ctx.shadowBlur = 0;
-
-  // Callout tail pointing down at the satellite.
-  ctx.beginPath();
-  ctx.moveTo(pillWidth / 2 - tailSize, pillHeight);
-  ctx.lineTo(pillWidth / 2, pillHeight + tailSize);
-  ctx.lineTo(pillWidth / 2 + tailSize, pillHeight);
-  ctx.closePath();
-  ctx.fillStyle = "rgba(9, 13, 30, 0.97)";
-  ctx.fill();
-  ctx.strokeStyle = color;
-  ctx.globalAlpha = 0.55;
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(pillWidth / 2 - tailSize, pillHeight - 0.5);
-  ctx.lineTo(pillWidth / 2, pillHeight + tailSize - 1);
-  ctx.lineTo(pillWidth / 2 + tailSize, pillHeight - 0.5);
-  ctx.stroke();
-  ctx.globalAlpha = 1;
-
-  const texture = new THREE.CanvasTexture(canvas);
-  const sprite = new THREE.Sprite(
-    new THREE.SpriteMaterial({
-      map: texture,
-      transparent: true,
-      depthWrite: false,
-      depthTest: true,
-    }),
-  );
-  // Anchor the sprite's bottom-center (the tail) at the satellite position.
-  sprite.center.set(0.5, 0);
-  sprite.scale.set(
-    (canvas.width / canvas.height) * LABEL_HEIGHT,
-    LABEL_HEIGHT,
-    1,
-  );
-  return sprite;
-}
-
 /** Everything the animation loop needs for one tracked satellite. */
 interface GlobeSatellite {
   tle: TleEntry;
@@ -233,7 +119,6 @@ interface GlobeSatellite {
   /** Live dot: hot white core + pulsing colored halo. */
   core: THREE.Sprite;
   halo: THREE.Sprite;
-  label: THREE.Sprite;
 }
 
 /** Build a satellite's scene objects from its TLE. */
@@ -266,9 +151,9 @@ function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
 
   const core = makeGlowSprite(color);
   core.scale.set(0.075, 0.075, 1);
+  core.userData = { noradId: tle.noradId };
   const halo = makeGlowSprite(color);
   halo.scale.set(0.22, 0.22, 1);
-  const label = makeLabelSprite(tle.name, color);
 
   return {
     tle,
@@ -279,7 +164,6 @@ function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
     futureLine,
     core,
     halo,
-    label,
   };
 }
 
@@ -289,11 +173,18 @@ interface GlobeView {
   earthGroup: THREE.Group;
   updateSatellites: (tles: TleEntry[]) => void;
   updateObserver: (lat: number, lon: number) => void;
+  setSelected: (id: string | null) => void;
   dispose: () => void;
 }
 
 /** Build the whole three.js scene; returns a handle for driving + disposal. */
-function createGlobeView(container: HTMLDivElement): GlobeView {
+function createGlobeView(
+  container: HTMLDivElement,
+  callbacks: {
+    onSelect: (id: string | null) => void;
+    onTelemetry: (telemetry: GlobeTelemetry) => void;
+  },
+): GlobeView {
   const scene = new THREE.Scene();
   const aspect = container.clientWidth / container.clientHeight || 1;
   const camera = new THREE.PerspectiveCamera(45, aspect, 0.1, 200);
@@ -371,18 +262,13 @@ function createGlobeView(container: HTMLDivElement): GlobeView {
 
   // Shared mutable satellite state read by the animation loop.
   const sats = new Map<string, GlobeSatellite>();
+  let observer: LatLon = { lat: 0, lon: 0 };
+  let selectedId: string | null = null;
   let youGlow: THREE.Sprite | null = null;
-  let youLabel: THREE.Sprite | null = null;
 
   const updateSatellites = (tles: TleEntry[]) => {
     for (const sat of sats.values()) {
-      earthGroup.remove(
-        sat.pastLine,
-        sat.futureLine,
-        sat.core,
-        sat.halo,
-        sat.label,
-      );
+      earthGroup.remove(sat.pastLine, sat.futureLine, sat.core, sat.halo);
       sat.pastGeometry.dispose();
       sat.futureGeometry.dispose();
       (sat.pastLine.material as THREE.Material).dispose();
@@ -391,46 +277,75 @@ function createGlobeView(container: HTMLDivElement): GlobeView {
       (sat.core.material as THREE.Material).dispose();
       (sat.halo.material as THREE.SpriteMaterial).map?.dispose();
       (sat.halo.material as THREE.Material).dispose();
-      (sat.label.material as THREE.SpriteMaterial).map?.dispose();
-      (sat.label.material as THREE.Material).dispose();
     }
     sats.clear();
 
     tles.forEach((tle, index) => {
       const sat = buildSatellite(tle, index);
-      earthGroup.add(
-        sat.pastLine,
-        sat.futureLine,
-        sat.core,
-        sat.halo,
-        sat.label,
-      );
+      earthGroup.add(sat.pastLine, sat.futureLine, sat.core, sat.halo);
       sats.set(tle.noradId, sat);
     });
   };
 
   const updateObserver = (lat: number, lon: number) => {
+    observer = { lat, lon };
     if (youGlow) {
       earthGroup.remove(youGlow);
       (youGlow.material as THREE.SpriteMaterial).map?.dispose();
       youGlow.material.dispose();
     }
-    if (youLabel) {
-      earthGroup.remove(youLabel);
-      (youLabel.material as THREE.SpriteMaterial).map?.dispose();
-      youLabel.material.dispose();
-    }
     youGlow = makeGlowSprite("#67e8f9");
     youGlow.scale.set(0.055, 0.055, 1);
     youGlow.position.copy(latLonAltToVector3(lat, lon, 0));
     earthGroup.add(youGlow);
-    youLabel = makeLabelSprite("You", "#67e8f9");
-    youLabel.position.copy(latLonAltToVector3(lat, lon, 0));
-    earthGroup.add(youLabel);
   };
+
+  const setSelected = (id: string | null) => {
+    selectedId = id;
+  };
+
+  // Click-to-select: a press that doesn't move much is a tap on a satellite.
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+  let pressX = 0;
+  let pressY = 0;
+  renderer.domElement.addEventListener("pointerdown", (event) => {
+    pressX = event.clientX;
+    pressY = event.clientY;
+  });
+  renderer.domElement.addEventListener("pointerup", (event) => {
+    if (
+      Math.hypot(event.clientX - pressX, event.clientY - pressY) > CLICK_SLOP_PX
+    ) {
+      return; // it was a drag, not a click
+    }
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObjects(
+      [...sats.values()].map((sat) => sat.core),
+      false,
+    );
+    callbacks.onSelect(
+      hits.length > 0 ? (hits[0].object.userData.noradId as string) : null,
+    );
+  });
+  renderer.domElement.addEventListener("pointermove", (event) => {
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObjects(
+      [...sats.values()].map((sat) => sat.core),
+      false,
+    );
+    renderer.domElement.style.cursor = hits.length > 0 ? "pointer" : "grab";
+  });
 
   const clock = new THREE.Clock();
   let frame = 0;
+  let lastTelemetryAt = 0;
   const animate = () => {
     frame = requestAnimationFrame(animate);
     const delta = clock.getDelta();
@@ -455,11 +370,12 @@ function createGlobeView(container: HTMLDivElement): GlobeView {
       );
       sat.core.position.copy(blipPos);
       sat.halo.position.copy(blipPos);
-      sat.label.position.copy(blipPos);
 
-      // Pulse the halo so the satellite reads as a live beacon.
+      // Pulse the halo so the satellite reads as a live beacon; the selected
+      // satellite breathes bigger so it stands out from the rest.
       const pulse = 0.5 + 0.5 * Math.sin(nowMs / 280);
-      const haloScale = 0.22 + 0.07 * pulse;
+      const base = sat.tle.noradId === selectedId ? 0.3 : 0.2;
+      const haloScale = base + 0.08 * pulse;
       sat.halo.scale.set(haloScale, haloScale, 1);
       (sat.halo.material as THREE.SpriteMaterial).opacity = 0.3 + 0.5 * pulse;
 
@@ -494,6 +410,34 @@ function createGlobeView(container: HTMLDivElement): GlobeView {
       sat.futureGeometry.attributes.position.needsUpdate = true;
       sat.pastGeometry.setDrawRange(0, k);
       sat.futureGeometry.setDrawRange(k, sat.times.length - k);
+    }
+
+    // Push live numbers to the HUD at a throttled rate (React state at 60fps
+    // would be wasteful — the canvas already animates at full speed).
+    if (nowMs - lastTelemetryAt >= TELEMETRY_INTERVAL_MS) {
+      lastTelemetryAt = nowMs;
+      const update: GlobeTelemetry = { sats: {} };
+      for (const sat of sats.values()) {
+        const telemetryPoint = currentSatelliteTelemetry(
+          sat.tle.line1,
+          sat.tle.line2,
+          now,
+        );
+        const look = observerLookAngles(
+          sat.tle.line1,
+          sat.tle.line2,
+          observer,
+          now,
+        );
+        update.sats[sat.tle.noradId] = {
+          altitudeKm: telemetryPoint?.altitudeKm ?? 0,
+          speedKmS: telemetryPoint?.speedKmS ?? 0,
+          elevationDeg: look?.elevationDeg ?? 0,
+          azimuthDeg: look?.azimuthDeg ?? 0,
+          inView: (look?.elevationDeg ?? -90) > 0,
+        };
+      }
+      callbacks.onTelemetry(update);
     }
 
     controls.update();
@@ -538,27 +482,40 @@ function createGlobeView(container: HTMLDivElement): GlobeView {
     renderer.domElement.remove();
   };
 
-  return { scene, earthGroup, updateSatellites, updateObserver, dispose };
+  return {
+    scene,
+    earthGroup,
+    updateSatellites,
+    updateObserver,
+    setSelected,
+    dispose,
+  };
 }
 
 export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<GlobeView | null>(null);
-  const tlesRef = useRef<TleEntry[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">(
     "loading",
   );
   const [error, setError] = useState<string | null>(null);
   const [tles, setTles] = useState<TleEntry[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [telemetry, setTelemetry] = useState<GlobeTelemetry | null>(null);
   const idsKey = selectedIds.join(",");
   const { lat, lon } = location;
 
-  // Create the scene once (client-only; the component is lazy-loaded).
+  // Create the scene once (client-only; the component is lazy-loaded). The
+  // useState setters are stable across renders, so they can be captured
+  // directly by the once-created scene.
   useEffect(() => {
     if (!mountRef.current || viewRef.current) {
       return;
     }
-    viewRef.current = createGlobeView(mountRef.current);
+    viewRef.current = createGlobeView(mountRef.current, {
+      onSelect: setSelectedId,
+      onTelemetry: setTelemetry,
+    });
     return () => {
       viewRef.current?.dispose();
       viewRef.current = null;
@@ -584,10 +541,15 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
         if (cancelled) {
           return;
         }
-        tlesRef.current = loaded;
         setTles(loaded);
         setStatus(loaded.length > 0 ? "ready" : "error");
         setError(null);
+        // Drop a selection that no longer exists in the new set.
+        setSelectedId((prev) =>
+          prev !== null && loaded.some((tle) => tle.noradId === prev)
+            ? prev
+            : null,
+        );
       } catch (err) {
         if (cancelled) {
           return;
@@ -617,6 +579,10 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
     }
   }, [tles, lat, lon]);
 
+  useEffect(() => {
+    viewRef.current?.setSelected(selectedId);
+  }, [selectedId]);
+
   return (
     <div className="glass glass-hover rounded-2xl p-6">
       <div className="mb-5 flex items-center gap-2.5">
@@ -642,6 +608,16 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
             className="aspect-square w-full rounded-2xl"
             aria-label="3D globe showing live satellite positions and ground tracks"
           />
+          {status === "ready" && (
+            <SatelliteGlobeHud
+              tles={tles}
+              telemetry={telemetry}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              location={{ lat, lon }}
+              colors={COLORS}
+            />
+          )}
           {status !== "ready" && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-2xl">
               {status === "loading" ? (
@@ -668,32 +644,16 @@ export function SatelliteGlobe({ location, selectedIds }: SatelliteGlobeProps) {
           <p className="text-xs leading-relaxed text-slate-500">
             The globe spins at Earth&apos;s real rate — satellites orbit in
             fixed space, so you see the planet revolve beneath them. The pulsing
-            dot is the satellite&apos;s live position; ground tracks around{" "}
+            dots are the satellites&apos; live positions around{" "}
             <span className="text-slate-300">
               {formatCoordinates(lat, lon)}
             </span>
             : past 30 min (dim), next 90 min (bright).
           </p>
-          <ul className="space-y-2">
-            {tles.map((tle, index) => (
-              <li key={tle.noradId} className="flex items-center gap-2.5">
-                <span
-                  className="size-2.5 rounded-full"
-                  style={{
-                    backgroundColor: COLORS[index % COLORS.length],
-                    boxShadow: `0 0 8px ${COLORS[index % COLORS.length]}`,
-                  }}
-                />
-                <span className="text-sm text-slate-200">{tle.name}</span>
-                <span className="mono ml-auto text-[10px] text-slate-500">
-                  NORAD {tle.noradId}
-                </span>
-              </li>
-            ))}
-          </ul>
           <p className="pt-1 text-[11px] leading-relaxed text-slate-600">
-            Drag to orbit · scroll to zoom · TLEs from CelesTrak, refreshed
-            every minute
+            Click a satellite (or its name in the list) to track it live · drag
+            to orbit · scroll to zoom · TLEs from CelesTrak, refreshed every
+            minute
           </p>
         </div>
       </div>
