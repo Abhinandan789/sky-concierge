@@ -30,6 +30,9 @@ export function LocateButton({ className }: { className?: string }) {
         } catch {
           // Storage unavailable — the URL still carries the location.
         }
+        // router.push re-renders the same page — without this, the button
+        // would keep its spinner forever even though the location arrived.
+        setLoading(false);
         router.push(
           `/?lat=${latitude.toFixed(4)}&lon=${longitude.toFixed(4)}#tonight`,
         );

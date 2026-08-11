@@ -93,6 +93,47 @@ describe("SQLite data layer", () => {
     expect(listed[0].email).toBe("a@b.co");
   });
 
+  it("keeps a verified row's unsubscribe token stable across unverified re-submits", () => {
+    const db = createSkyDb(":memory:");
+    const first = upsertSubscription(db, {
+      email: "a@b.co",
+      lat: 40.7,
+      lon: -74,
+      events: "iss",
+    });
+
+    // Re-submitting as unverified (double opt-in pending) must not rotate the
+    // verified row's token — that would let anyone who knows an address and
+    // coordinates invalidate the owner's saved unsubscribe link.
+    const second = upsertSubscription(db, {
+      email: "a@b.co",
+      lat: 40.7,
+      lon: -74,
+      events: "iss,aurora",
+      verified: false,
+    });
+    expect(second.verified).toBe(true);
+    expect(second.unsubscribeToken).toBe(first.unsubscribeToken);
+
+    // A never-confirmed row still gets fresh tokens on every re-submit.
+    const pending = upsertSubscription(db, {
+      email: "p@q.co",
+      lat: 1,
+      lon: 2,
+      events: "iss",
+      verified: false,
+    });
+    const pendingAgain = upsertSubscription(db, {
+      email: "p@q.co",
+      lat: 1,
+      lon: 2,
+      events: "aurora",
+      verified: false,
+    });
+    expect(pendingAgain.verifyToken).not.toBe(pending.verifyToken);
+    expect(pendingAgain.unsubscribeToken).not.toBe(pending.unsubscribeToken);
+  });
+
   it("confirms subscriptions by verify token", () => {
     const db = createSkyDb(":memory:");
     const { verifyToken } = upsertSubscription(db, {

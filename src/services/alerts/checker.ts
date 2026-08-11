@@ -8,6 +8,7 @@ import {
   listEnabledSubscriptions,
   removeAlertLog,
   removePushLog,
+  type PushSubscriptionRow,
 } from "@/lib/db";
 import {
   formatCompass,
@@ -199,35 +200,42 @@ async function buildCandidates(
   return candidatesFromBrief(subscription, brief, now, timeZone);
 }
 
-/** Send push notifications for due alerts to matching browser subscriptions. */
+/**
+ * Send push notifications for due alerts to matching browser subscriptions.
+ * Every (push subscription, event type) pair that gets a candidate is marked
+ * as covered so the standalone push pass below only evaluates the rest.
+ */
 async function dispatchPushAlerts(params: {
   subscription: SubscriptionLike;
   candidates: DueAlert[];
   db: DatabaseSync;
   dateKey: string;
+  pushSubs: PushSubscriptionRow[];
+  covered: Set<string>;
 }): Promise<number> {
-  const { subscription, candidates, db, dateKey } = params;
+  const { subscription, candidates, db, dateKey, pushSubs, covered } = params;
   if (candidates.length === 0) {
-    return 0;
-  }
-
-  const pushSubs = listEnabledPushSubscriptions(db).filter((pushSub) =>
-    nearLocation(pushSub.lat, pushSub.lon, subscription.lat, subscription.lon),
-  );
-  if (pushSubs.length === 0) {
     return 0;
   }
 
   let sent = 0;
   for (const candidate of candidates) {
-    const matching = pushSubs.filter((pushSub) =>
-      pushSub.events
-        .split(",")
-        .map((event) => event.trim())
-        .includes(candidate.eventType),
+    const matching = pushSubs.filter(
+      (pushSub) =>
+        nearLocation(
+          pushSub.lat,
+          pushSub.lon,
+          subscription.lat,
+          subscription.lon,
+        ) &&
+        pushSub.events
+          .split(",")
+          .map((event) => event.trim())
+          .includes(candidate.eventType),
     );
 
     for (const pushSub of matching) {
+      covered.add(`${pushSub.id}:${candidate.eventType}`);
       const claimed = insertPushLogIfNotExists(db, {
         subscriptionId: pushSub.id,
         eventType: candidate.eventType,
@@ -276,7 +284,11 @@ export async function runAlertCheck(
   const db = options.db ?? getDb();
 
   const subscriptions = listEnabledSubscriptions(db);
+  const pushSubs = listEnabledPushSubscriptions(db);
   const dateKey = utcDateKey(now);
+  // (push subscription id, event type) pairs already evaluated via a nearby
+  // email subscription's candidates — the standalone pass skips these.
+  const covered = new Set<string>();
 
   let sent = 0;
   for (const subscription of subscriptions) {
@@ -311,10 +323,58 @@ export async function runAlertCheck(
       }
     }
 
-    sent += await dispatchPushAlerts({ subscription, candidates, db, dateKey });
+    sent += await dispatchPushAlerts({
+      subscription,
+      candidates,
+      db,
+      dateKey,
+      pushSubs,
+      covered,
+    });
   }
 
-  return { checked: subscriptions.length, sent };
+  // Standalone push pass: browsers with push-only subscriptions (or event
+  // types no nearby email subscription covers) still get evaluated — at their
+  // own location, with their own event selection. Atomic per-day dedup means
+  // anything already dispatched above can never be double-sent.
+  let pushChecked = 0;
+  for (const pushSub of pushSubs) {
+    const uncoveredEvents = pushSub.events
+      .split(",")
+      .map((event) => event.trim())
+      .filter(Boolean)
+      .filter((event) => !covered.has(`${pushSub.id}:${event}`));
+    if (uncoveredEvents.length === 0) {
+      continue;
+    }
+    pushChecked += 1;
+
+    const brief = await buildTonightBrief(
+      { lat: pushSub.lat, lon: pushSub.lon },
+      { now, fetcher },
+    );
+    const timeZone = timeZoneFor(pushSub.lat, pushSub.lon);
+    const synthetic: SubscriptionLike = {
+      id: pushSub.id,
+      email: "",
+      lat: pushSub.lat,
+      lon: pushSub.lon,
+      events: uncoveredEvents.join(","),
+    };
+    const candidates = candidatesFromBrief(synthetic, brief, now, timeZone);
+    if (candidates.length > 0) {
+      sent += await dispatchPushAlerts({
+        subscription: synthetic,
+        candidates,
+        db,
+        dateKey,
+        pushSubs: [pushSub],
+        covered,
+      });
+    }
+  }
+
+  return { checked: subscriptions.length + pushChecked, sent };
 }
 
 // ─── Weekly digest ─────────────────────────────────────────────────────────

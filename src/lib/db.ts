@@ -209,7 +209,14 @@ export function upsertSubscription(
        enabled = 1,
        verified = MAX(alert_subscriptions.verified, excluded.verified),
        verify_token = excluded.verify_token,
-       unsubscribe_token = excluded.unsubscribe_token`,
+       -- A verified row keeps its unsubscribe token: an unverified re-submit
+       -- (e.g. someone submitting an address they don't control) must neither
+       -- harvest nor rotate the owner's token. Unverified rows get fresh ones.
+       unsubscribe_token = CASE
+         WHEN alert_subscriptions.verified = 1
+           THEN alert_subscriptions.unsubscribe_token
+           ELSE excluded.unsubscribe_token
+       END`,
   ).run(
     randomUUID(),
     email,

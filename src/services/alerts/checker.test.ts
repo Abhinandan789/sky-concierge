@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSkyDb, upsertSubscription } from "@/lib/db";
+import {
+  createSkyDb,
+  upsertPushSubscription,
+  upsertSubscription,
+} from "@/lib/db";
 import { formatTime } from "@/lib/utils";
 import type { IssPass, SkyBrief } from "@/types";
 import {
@@ -306,6 +310,69 @@ describe("runAlertCheck", () => {
     } finally {
       consoleSpy.mockRestore();
     }
+  });
+
+  it("evaluates push-only subscriptions independently of email subscriptions", async () => {
+    const db = createSkyDb(":memory:");
+    // No email subscriptions at all — just a browser that registered for push.
+    upsertPushSubscription(db, {
+      endpoint: "https://push.example.com/standalone",
+      p256dh: "key",
+      auth: "auth",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+
+    const sender = { send: vi.fn(async () => undefined) };
+    const result = await runAlertCheck({
+      db,
+      sender,
+      now: new Date(2026, 7, 11, 20, 0, 0), // Perseids peak in 1 day
+      fetcher: offlineFetcher,
+    });
+
+    expect(sender.send).not.toHaveBeenCalled();
+    // The push-only browser was still evaluated (0 email subs + 1 push sub).
+    expect(result.checked).toBe(1);
+    const logs = db
+      .prepare(`SELECT event_type AS eventType FROM push_logs`)
+      .all() as { eventType: string }[];
+    expect(logs.map((log) => log.eventType)).toContain("showers");
+  });
+
+  it("does not double-evaluate push subs already covered by a nearby email sub", async () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "nearby@example.com",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+    upsertPushSubscription(db, {
+      endpoint: "https://push.example.com/covered",
+      p256dh: "key",
+      auth: "auth",
+      lat: 40.71,
+      lon: -74.01,
+      events: "showers",
+    });
+
+    const sender = { send: vi.fn(async () => undefined) };
+    const result = await runAlertCheck({
+      db,
+      sender,
+      now: new Date(2026, 7, 11, 20, 0, 0),
+      fetcher: offlineFetcher,
+    });
+
+    // 1 email sub evaluated; the push sub was covered by it, not re-checked.
+    expect(result.checked).toBe(1);
+    const logs = db
+      .prepare(`SELECT event_type AS eventType FROM push_logs`)
+      .all() as { eventType: string }[];
+    expect(logs).toHaveLength(1);
+    expect(logs[0].eventType).toBe("showers");
   });
 
   it("appends an unsubscribe link to every emailed alert", async () => {

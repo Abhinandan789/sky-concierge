@@ -42,14 +42,18 @@ describe("POST /api/subscriptions", () => {
   });
 
   it("creates a subscription, auto-verified in console mode", async () => {
-    const response = await subscribePost(post("/api/subscriptions", VALID_BODY));
+    const response = await subscribePost(
+      post("/api/subscriptions", VALID_BODY),
+    );
     const body = await response.json();
 
     expect(response.status).toBe(201);
     expect(body.success).toBe(true);
     expect(body.data.verified).toBe(true);
     expect(body.data.id).toBeTruthy();
-    expect(body.data.unsubscribeToken).toBeTruthy();
+    // Unsubscribe tokens only ever travel inside alert emails, never in
+    // unauthenticated API responses.
+    expect(body.data.unsubscribeToken).toBeUndefined();
     expect(listEnabledSubscriptions(getDb())).toHaveLength(1);
   });
 
@@ -78,7 +82,9 @@ describe("POST /api/subscriptions", () => {
     const resendMock = vi.fn(async () => new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", resendMock);
 
-    const response = await subscribePost(post("/api/subscriptions", VALID_BODY));
+    const response = await subscribePost(
+      post("/api/subscriptions", VALID_BODY),
+    );
     const body = await response.json();
 
     expect(response.status).toBe(201);
@@ -114,15 +120,66 @@ describe("POST /api/subscriptions", () => {
     expect(listEnabledSubscriptions(getDb())).toHaveLength(1);
   });
 
-  it("unsubscribes via the per-subscription token", async () => {
-    const created = await subscribePost(post("/api/subscriptions", VALID_BODY));
-    const { unsubscribeToken } = (await created.json()).data;
+  it("unsubscribes via the per-subscription token (from the DB, as email links do)", async () => {
+    await subscribePost(post("/api/subscriptions", VALID_BODY));
+    const row = getDb()
+      .prepare(
+        `SELECT unsubscribe_token AS unsubscribeToken
+         FROM alert_subscriptions WHERE email = ?`,
+      )
+      .get(VALID_BODY.email) as { unsubscribeToken: string };
 
     const response = await unsubscribePost(
-      post("/api/subscriptions/unsubscribe", { token: unsubscribeToken }),
+      post("/api/subscriptions/unsubscribe", { token: row.unsubscribeToken }),
     );
     expect(response.status).toBe(200);
     expect(listEnabledSubscriptions(getDb())).toHaveLength(0);
+  });
+
+  it("never exposes or rotates the token for an already-verified address", async () => {
+    vi.stubEnv("RESEND_API_KEY", "test-key");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{}", { status: 200 })),
+    );
+
+    // The owner signs up and confirms via the email link.
+    const first = await subscribePost(post("/api/subscriptions", VALID_BODY));
+    expect((await first.json()).data.unsubscribeToken).toBeUndefined();
+    const pending = getDb()
+      .prepare(
+        `SELECT verify_token AS verifyToken
+         FROM alert_subscriptions WHERE email = ?`,
+      )
+      .get(VALID_BODY.email) as { verifyToken: string };
+    await verifyPost(
+      post("/api/subscriptions/verify", { token: pending.verifyToken }),
+    );
+    const ownerToken = (
+      getDb()
+        .prepare(
+          `SELECT unsubscribe_token AS unsubscribeToken
+         FROM alert_subscriptions WHERE email = ?`,
+        )
+        .get(VALID_BODY.email) as { unsubscribeToken: string }
+    ).unsubscribeToken;
+
+    // Someone who doesn't control the mailbox re-submits the same details…
+    const resubmit = await subscribePost(
+      post("/api/subscriptions", VALID_BODY),
+    );
+    const resubmitBody = await resubmit.json();
+    expect(resubmitBody.data.verified).toBe(true);
+    expect(resubmitBody.data.unsubscribeToken).toBeUndefined();
+
+    // …and can neither harvest nor rotate the owner's unsubscribe token.
+    const after = getDb()
+      .prepare(
+        `SELECT unsubscribe_token AS unsubscribeToken
+         FROM alert_subscriptions WHERE email = ?`,
+      )
+      .get(VALID_BODY.email) as { unsubscribeToken: string };
+    expect(after.unsubscribeToken).toBe(ownerToken);
   });
 
   it("rate limits repeated signups from one IP", async () => {

@@ -130,7 +130,9 @@ export async function POST(request: NextRequest) {
       {
         id: subscription.id,
         verified: subscription.verified,
-        unsubscribeToken: subscription.unsubscribeToken,
+        // Unsubscribe tokens are only ever delivered inside alert emails —
+        // never in API responses. An unauthenticated signup must not be able
+        // to harvest a token for an address it doesn't control.
       },
       { status: 201 },
     );
