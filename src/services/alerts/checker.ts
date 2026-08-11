@@ -1,18 +1,36 @@
 import type { DatabaseSync } from "node:sqlite";
+import { siteUrl } from "@/config/site";
 import {
   getDb,
   insertAlertLogIfNotExists,
+  insertPushLogIfNotExists,
+  listEnabledPushSubscriptions,
   listEnabledSubscriptions,
   removeAlertLog,
+  removePushLog,
 } from "@/lib/db";
-import { formatCompass, formatTime } from "@/lib/utils";
+import {
+  formatCompass,
+  formatDayTime,
+  formatTime,
+  timeZoneFor,
+} from "@/lib/utils";
 import { buildTonightBrief } from "@/services/sky/brief";
 import type { AlertEventType, SkyBrief } from "@/types";
-import { ConsoleSender, createSender, type AlertMessage, type AlertSender } from "./sender";
+import { sendPush } from "./push";
+import {
+  ConsoleSender,
+  createSender,
+  type AlertMessage,
+  type AlertSender,
+} from "./sender";
 
 const ISS_ALERT_LEAD_MINUTES = 60;
 const SHOWER_ALERT_DAYS = 3;
 const AURORA_ALERT_LEVELS = ["MODERATE", "HIGH", "STORM"] as const;
+/** How close (degrees) an email subscription's location must be to a push
+ * subscription for a notification to match. */
+const PUSH_PROXIMITY_DEG = 1.0;
 
 export interface SubscriptionLike {
   id: string;
@@ -20,6 +38,7 @@ export interface SubscriptionLike {
   lat: number;
   lon: number;
   events: string;
+  unsubscribeToken?: string | null;
 }
 
 export interface DueAlert {
@@ -46,6 +65,48 @@ function utcDateKey(date: Date) {
   return date.toISOString().slice(0, 10);
 }
 
+/** ISO week key (e.g. "2026-W33") used to send digests at most once a week. */
+export function isoWeekKey(date: Date): string {
+  const d = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+  );
+  const dayNum = d.getUTCDay() || 7; // Sun = 7, Mon = 1 … Sat = 6
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum); // move to this week's Thursday
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(
+    (d.getTime() - yearStart.getTime()) / 86_400_000 / 7 + 1 / 7,
+  );
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+}
+
+/** Approximate proximity check for matching push subscriptions to a location. */
+function nearLocation(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): boolean {
+  return (
+    Math.abs(lat1 - lat2) <= PUSH_PROXIMITY_DEG &&
+    Math.abs(lon1 - lon2) <= PUSH_PROXIMITY_DEG
+  );
+}
+
+/** Every emailed alert carries an unsubscribe link (CAN-SPAM friendly). */
+function withUnsubscribeFooter(
+  message: AlertMessage,
+  subscription: SubscriptionLike,
+): AlertMessage {
+  if (!subscription.unsubscribeToken) {
+    return message;
+  }
+  const url = `${siteUrl()}/unsubscribe?token=${subscription.unsubscribeToken}`;
+  return {
+    subject: message.subject,
+    body: `${message.body}\n\n—\nSky Concierge · unsubscribe: ${url}`,
+  };
+}
+
 /**
  * Pure decision logic: given a subscription and a computed sky brief, which
  * alerts are due right now? No I/O — fully unit-testable.
@@ -54,6 +115,7 @@ export function candidatesFromBrief(
   subscription: SubscriptionLike,
   brief: SkyBrief,
   now: Date,
+  timeZone?: string,
 ): DueAlert[] {
   const events = subscription.events
     .split(",")
@@ -69,15 +131,16 @@ export function candidatesFromBrief(
     );
     // Skip passes that are already underway.
     if (minutesUntil >= 0 && minutesUntil <= ISS_ALERT_LEAD_MINUTES) {
+      const satelliteName = next.satelliteName ?? "ISS";
       candidates.push({
         subscriptionId: subscription.id,
         email: subscription.email,
         eventType: "iss",
         message: {
-          subject: `ISS pass in ~${minutesUntil} min over your location`,
+          subject: `${satelliteName} pass in ~${minutesUntil} min over your location`,
           body: [
-            `Rises ${formatTime(next.start)} and reaches ${next.maxElevationDeg}° for ${Math.round(next.durationMinutes)} minutes.`,
-            `Look ${formatCompass(next.maxAzimuthDeg)} at ${formatTime(next.max)} — no telescope needed.`,
+            `Rises ${formatTime(next.start, timeZone)} and reaches ${next.maxElevationDeg}° for ${Math.round(next.durationMinutes)} minutes.`,
+            `Look ${formatCompass(next.maxAzimuthDeg)} at ${formatTime(next.max, timeZone)} — no telescope needed.`,
           ].join("\n"),
         },
       });
@@ -132,7 +195,69 @@ async function buildCandidates(
     { lat: subscription.lat, lon: subscription.lon },
     { now, fetcher },
   );
-  return candidatesFromBrief(subscription, brief, now);
+  const timeZone = timeZoneFor(subscription.lat, subscription.lon);
+  return candidatesFromBrief(subscription, brief, now, timeZone);
+}
+
+/** Send push notifications for due alerts to matching browser subscriptions. */
+async function dispatchPushAlerts(params: {
+  subscription: SubscriptionLike;
+  candidates: DueAlert[];
+  db: DatabaseSync;
+  dateKey: string;
+}): Promise<number> {
+  const { subscription, candidates, db, dateKey } = params;
+  if (candidates.length === 0) {
+    return 0;
+  }
+
+  const pushSubs = listEnabledPushSubscriptions(db).filter((pushSub) =>
+    nearLocation(pushSub.lat, pushSub.lon, subscription.lat, subscription.lon),
+  );
+  if (pushSubs.length === 0) {
+    return 0;
+  }
+
+  let sent = 0;
+  for (const candidate of candidates) {
+    const matching = pushSubs.filter((pushSub) =>
+      pushSub.events
+        .split(",")
+        .map((event) => event.trim())
+        .includes(candidate.eventType),
+    );
+
+    for (const pushSub of matching) {
+      const claimed = insertPushLogIfNotExists(db, {
+        subscriptionId: pushSub.id,
+        eventType: candidate.eventType,
+        message: candidate.message.subject,
+        dateKey,
+      });
+      if (!claimed) {
+        continue; // already notified for this event today
+      }
+
+      try {
+        await sendPush(pushSub, {
+          title: candidate.message.subject,
+          body: candidate.message.body,
+          url: `/?lat=${subscription.lat}&lon=${subscription.lon}#tonight`,
+        });
+        sent += 1;
+      } catch (error) {
+        // Roll back so the notification retries on the next run, then fail loudly.
+        removePushLog(db, {
+          subscriptionId: pushSub.id,
+          eventType: candidate.eventType,
+          dateKey,
+        });
+        throw error;
+      }
+    }
+  }
+
+  return sent;
 }
 
 /**
@@ -169,7 +294,10 @@ export async function runAlertCheck(
       }
 
       try {
-        await sender.send(candidate.email, candidate.message);
+        await sender.send(
+          candidate.email,
+          withUnsubscribeFooter(candidate.message, subscription),
+        );
         sent += 1;
       } catch (error) {
         // Roll back the claim so a transient send failure doesn't swallow
@@ -181,6 +309,131 @@ export async function runAlertCheck(
         });
         throw error;
       }
+    }
+
+    sent += await dispatchPushAlerts({ subscription, candidates, db, dateKey });
+  }
+
+  return { checked: subscriptions.length, sent };
+}
+
+// ─── Weekly digest ─────────────────────────────────────────────────────────
+
+export interface DigestOptions {
+  sender?: AlertSender;
+  now?: Date;
+  fetcher?: typeof fetch;
+  db?: DatabaseSync;
+}
+
+/** Compose the weekly "sky highlights" email from a computed brief. */
+export function composeDigestMessage(
+  brief: SkyBrief,
+  now: Date,
+  timeZone?: string,
+): AlertMessage {
+  const lines: string[] = [
+    `Weekly sky highlights for your location (${brief.location.lat.toFixed(2)}, ${brief.location.lon.toFixed(2)}):`,
+  ];
+
+  const nextPasses = brief.issPasses.slice(0, 3);
+  if (nextPasses.length > 0) {
+    lines.push("", "Satellite passes:");
+    for (const pass of nextPasses) {
+      lines.push(
+        `  • ${formatDayTime(pass.start, timeZone)} — ${pass.satelliteName ?? "Satellite"}, max ${pass.maxElevationDeg}° for ${Math.round(pass.durationMinutes)} min`,
+      );
+    }
+  }
+
+  const showersSoon = brief.showers.filter(
+    (shower) => shower.daysUntilPeak >= 0 && shower.daysUntilPeak <= 14,
+  );
+  if (showersSoon.length > 0) {
+    lines.push("", "Meteor showers:");
+    for (const shower of showersSoon) {
+      lines.push(
+        `  • ${shower.name} peaks ${shower.daysUntilPeak === 0 ? "tonight" : `in ${shower.daysUntilPeak} days`} (~${shower.zhr}/hr)`,
+      );
+    }
+  }
+
+  if (brief.aurora) {
+    lines.push(
+      "",
+      `Aurora watch: predicted Kp ${brief.aurora.maxKpTonight} (${brief.aurora.level}).`,
+    );
+  }
+
+  lines.push(
+    "",
+    `Moon: ${brief.moon.phaseName}, ${Math.round(brief.moon.illumination * 100)}% illuminated.`,
+    "",
+    now.toLocaleDateString([], {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    }),
+  );
+
+  if (nextPasses.length === 0 && showersSoon.length === 0 && !brief.aurora) {
+    lines.splice(1, 0, "", "Nothing notable this week — the sky is quiet.");
+  }
+
+  return {
+    subject: "Sky Concierge — weekly sky highlights",
+    body: lines.join("\n"),
+  };
+}
+
+/**
+ * Send the weekly digest to every verified subscription, at most once per
+ * ISO week (dedup via the same atomic alert_logs mechanism).
+ */
+export async function runDigestCheck(
+  options: DigestOptions = {},
+): Promise<AlertCheckResult> {
+  const sender = options.sender ?? createSender();
+  const now = options.now ?? new Date();
+  const fetcher = options.fetcher ?? fetch;
+  const db = options.db ?? getDb();
+
+  const weekKey = isoWeekKey(now);
+  const subscriptions = listEnabledSubscriptions(db);
+
+  let sent = 0;
+  for (const subscription of subscriptions) {
+    const claimed = insertAlertLogIfNotExists(db, {
+      subscriptionId: subscription.id,
+      eventType: "digest",
+      message: "weekly digest",
+      dateKey: weekKey,
+    });
+    if (!claimed) {
+      continue; // digest already sent this week
+    }
+
+    try {
+      const brief = await buildTonightBrief(
+        { lat: subscription.lat, lon: subscription.lon },
+        { now, fetcher },
+      );
+      const timeZone = timeZoneFor(subscription.lat, subscription.lon);
+      await sender.send(
+        subscription.email,
+        withUnsubscribeFooter(
+          composeDigestMessage(brief, now, timeZone),
+          subscription,
+        ),
+      );
+      sent += 1;
+    } catch (error) {
+      removeAlertLog(db, {
+        subscriptionId: subscription.id,
+        eventType: "digest",
+        dateKey: weekKey,
+      });
+      throw error;
     }
   }
 

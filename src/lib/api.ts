@@ -6,9 +6,10 @@ export function jsonError(
   message: string,
   status: number,
   code = "BAD_REQUEST",
+  headers?: HeadersInit,
 ) {
   return Response.json(
     { success: false, error: { code, message } },
-    { status },
+    { status, headers },
   );
 }

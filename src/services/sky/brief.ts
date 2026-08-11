@@ -7,11 +7,11 @@ import type {
   SkyBrief,
   SkyBriefError,
 } from "@/types";
-import { computeTonightAurora, fetchKpForecast } from "./aurora";
+import { computeTonightAurora } from "./aurora";
+import { getCachedKpForecast, getCachedTleSet } from "./cache";
 import { findSatellitePasses } from "./iss-passes";
 import { computeMoonInfo } from "./moon";
 import { computeShowerStatus } from "./showers";
-import { fetchTleSet } from "./tle";
 
 const DEFAULT_NORAD_IDS = ["25544"];
 const SHOWER_RELEVANCE_WINDOW_DAYS = 21;
@@ -33,6 +33,17 @@ function readNoradIds(): string[] {
   return ids.length > 0 ? ids : DEFAULT_NORAD_IDS;
 }
 
+/**
+ * Resolve the NORAD ids to track: explicit ids win, otherwise the
+ * server-configured set (env or ISS). Shared by the brief and the TLE API.
+ */
+export function resolveNoradIds(explicitIds?: string[]): string[] {
+  if (explicitIds && explicitIds.length > 0) {
+    return explicitIds;
+  }
+  return readNoradIds();
+}
+
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
@@ -49,40 +60,49 @@ export async function buildTonightBrief(
   const now = options.now ?? new Date();
   const errors: SkyBriefError[] = [];
 
-  // --- Satellite passes ---
+  // --- Satellite passes + aurora, fetched in parallel ---
   let issPasses: IssPass[] = [];
-  try {
-    const ids = options.noradIds ?? readNoradIds();
-    const all: IssPass[] = [];
-    for (const id of ids) {
-      const tle = await fetchTleSet(id, fetcher);
-      all.push(
-        ...findSatellitePasses(tle.line1, tle.line2, location, {
+  let aurora: AuroraInfo | null = null;
+  const [passResult, auroraRows] = await Promise.allSettled([
+    (async () => {
+      const ids = resolveNoradIds(options.noradIds);
+      const all: IssPass[] = [];
+      for (const id of ids) {
+        const tle = await getCachedTleSet(id, fetcher);
+        const passes = findSatellitePasses(tle.line1, tle.line2, location, {
           now,
           windowHours: options.windowHours,
-        }),
-      );
-    }
-    all.sort((a, b) => a.start.getTime() - b.start.getTime());
-    issPasses = all;
-  } catch (error) {
-    errors.push({ section: "iss", message: errorMessage(error) });
-  }
+        });
+        all.push(
+          ...passes.map((pass) => ({ ...pass, satelliteName: tle.name })),
+        );
+      }
+      all.sort((a, b) => a.start.getTime() - b.start.getTime());
+      return all;
+    })(),
+    getCachedKpForecast(fetcher),
+  ]);
 
-  // --- Aurora ---
-  let aurora: AuroraInfo | null = null;
-  try {
-    const rows = await fetchKpForecast(fetcher);
-    aurora = computeTonightAurora(rows, now);
-  } catch (error) {
-    errors.push({ section: "aurora", message: errorMessage(error) });
+  if (passResult.status === "fulfilled") {
+    issPasses = passResult.value;
+  } else {
+    errors.push({ section: "iss", message: errorMessage(passResult.reason) });
+  }
+  if (auroraRows.status === "fulfilled") {
+    aurora = computeTonightAurora(auroraRows.value, now);
+  } else {
+    errors.push({
+      section: "aurora",
+      message: errorMessage(auroraRows.reason),
+    });
   }
 
   // --- Meteor showers ---
   let showers: ShowerInfo[] = [];
   try {
     showers = computeShowerStatus(now).filter(
-      (shower) => Math.abs(shower.daysUntilPeak) <= SHOWER_RELEVANCE_WINDOW_DAYS,
+      (shower) =>
+        Math.abs(shower.daysUntilPeak) <= SHOWER_RELEVANCE_WINDOW_DAYS,
     );
   } catch (error) {
     errors.push({ section: "showers", message: errorMessage(error) });

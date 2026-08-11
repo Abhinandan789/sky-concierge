@@ -1,0 +1,361 @@
+"use client";
+
+import { Loader2, Radar, Satellite } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { formatCoordinates } from "@/lib/utils";
+import {
+  RADAR_RADIUS_KM,
+  clampToRadius,
+  computeGroundTrack,
+  currentGroundPoint,
+  horizonRadiusKm,
+  splitTrackAt,
+  toLocalKm,
+  type GroundTrackPoint,
+} from "@/lib/satellite-map";
+import type { LatLon } from "@/types";
+
+interface TleEntry {
+  noradId: string;
+  name: string;
+  line1: string;
+  line2: string;
+}
+
+interface SatelliteMapProps {
+  location: LatLon;
+  /** NORAD ids selected in the picker; empty = server-configured set. */
+  selectedIds: string[];
+}
+
+const COLORS = ["#22d3ee", "#fbbf24", "#e879f9", "#34d399"];
+const LOGICAL_SIZE = 480;
+const PAD = 36;
+const TRACK_REFRESH_MS = 60_000;
+
+function drawRadar(
+  canvas: HTMLCanvasElement,
+  options: {
+    location: LatLon;
+    tles: TleEntry[];
+    tracks: Map<string, GroundTrackPoint[]>;
+    now: Date;
+  },
+) {
+  const { location, tles, tracks, now } = options;
+  const dpr = window.devicePixelRatio || 1;
+  const size = LOGICAL_SIZE;
+  if (canvas.width !== size * dpr) {
+    canvas.width = size * dpr;
+    canvas.height = size * dpr;
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, size, size);
+
+  const center = size / 2;
+  const inner = size / 2 - PAD;
+  const kmPerPx = RADAR_RADIUS_KM / inner;
+
+  const toCanvas = (eastKm: number, northKm: number) => {
+    const clamped = clampToRadius(eastKm, northKm);
+    return {
+      x: center + clamped.eastKm / kmPerPx,
+      y: center - clamped.northKm / kmPerPx,
+    };
+  };
+
+  // Radar disc
+  ctx.beginPath();
+  ctx.arc(center, center, inner, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(2, 6, 23, 0.65)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.3)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Range rings (1000 / 2000 / 3000 km)
+  for (const km of [1000, 2000, RADAR_RADIUS_KM]) {
+    ctx.beginPath();
+    ctx.arc(center, center, (km / RADAR_RADIUS_KM) * inner, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.12)";
+    ctx.stroke();
+  }
+
+  // Horizon circle for a ~400 km orbit (dashed)
+  const horizonPx = Math.min(
+    (horizonRadiusKm(400) / RADAR_RADIUS_KM) * inner,
+    inner,
+  );
+  ctx.beginPath();
+  ctx.arc(center, center, horizonPx, 0, Math.PI * 2);
+  ctx.setLineDash([4, 6]);
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Crosshair
+  ctx.beginPath();
+  ctx.moveTo(center - inner, center);
+  ctx.lineTo(center + inner, center);
+  ctx.moveTo(center, center - inner);
+  ctx.lineTo(center, center + inner);
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.08)";
+  ctx.stroke();
+
+  // Cardinal labels
+  ctx.fillStyle = "rgba(148, 163, 184, 0.85)";
+  ctx.font = "600 11px ui-monospace, 'SF Mono', Menlo, monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("N", center, center - inner - 13);
+  ctx.fillText("S", center, center + inner + 15);
+  ctx.fillText("E", center + inner + 15, center);
+  ctx.fillText("W", center - inner - 15, center);
+
+  const nowMs = now.getTime();
+
+  // Satellite tracks + blips
+  tles.forEach((tle, index) => {
+    const color = COLORS[index % COLORS.length];
+    const track = tracks.get(tle.noradId) ?? [];
+    const { past, future } = splitTrackAt(track, nowMs);
+
+    const drawTrack = (points: GroundTrackPoint[], alpha: number) => {
+      if (points.length === 0) {
+        return;
+      }
+      ctx.beginPath();
+      let started = false;
+      for (const point of points) {
+        const { eastKm, northKm } = toLocalKm(point.lat, point.lon, location);
+        const { x, y } = toCanvas(eastKm, northKm);
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    };
+    drawTrack(past, 0.3);
+    drawTrack(future, 0.9);
+
+    const current = currentGroundPoint(tle.line1, tle.line2, now);
+    if (!current) {
+      return;
+    }
+    const { eastKm, northKm } = toLocalKm(current.lat, current.lon, location);
+    const { x, y } = toCanvas(eastKm, northKm);
+
+    // Blip with glow + halo
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 12;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.beginPath();
+    ctx.arc(x, y, 9, 0, Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.35;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // Name label
+    ctx.fillStyle = color;
+    ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(tle.name, x + 11, y - 4);
+  });
+
+  // Observer at the center
+  ctx.beginPath();
+  ctx.arc(center, center, 5, 0, Math.PI * 2);
+  ctx.fillStyle = "#67e8f9";
+  ctx.shadowColor = "#67e8f9";
+  ctx.shadowBlur = 14;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = "rgba(103, 232, 249, 0.6)";
+  ctx.stroke();
+  ctx.fillStyle = "rgba(226, 232, 240, 0.9)";
+  ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText("You", center + 9, center - 4);
+}
+
+/**
+ * Live satellite radar: a custom canvas map centered on the observer showing
+ * each tracked satellite's ground track (past 30 min dim, next 90 min bright)
+ * and its live position. TLEs come from the same server-side cache as the
+ * brief and are propagated client-side, so the map animates without any
+ * network traffic.
+ */
+export function SatelliteMap({ location, selectedIds }: SatelliteMapProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const tlesRef = useRef<TleEntry[]>([]);
+  const tracksRef = useRef<Map<string, GroundTrackPoint[]>>(new Map());
+  const [tles, setTles] = useState<TleEntry[]>([]);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
+  const [error, setError] = useState<string | null>(null);
+  const idsKey = selectedIds.join(",");
+  const { lat, lon } = location;
+
+  // Load TLEs and precompute tracks; refresh every minute (server TTL-caches).
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      const params = new URLSearchParams();
+      if (idsKey.length > 0) {
+        params.set("norad", idsKey);
+      }
+      try {
+        const response = await fetch(`/api/sky/tles?${params.toString()}`);
+        const body = await response.json();
+        if (!response.ok || !body?.data?.tles) {
+          throw new Error(body?.error?.message ?? "Couldn't load satellites.");
+        }
+        const loaded: TleEntry[] = body.data.tles;
+        if (cancelled) {
+          return;
+        }
+        tlesRef.current = loaded;
+        tracksRef.current = new Map(
+          loaded.map((tle) => [
+            tle.noradId,
+            computeGroundTrack(tle.line1, tle.line2),
+          ]),
+        );
+        setTles(loaded);
+        setStatus(loaded.length > 0 ? "ready" : "error");
+        setError(null);
+      } catch (err) {
+        if (cancelled) {
+          return;
+        }
+        setStatus("error");
+        setError(err instanceof Error ? err.message : "Unknown error");
+      }
+    };
+
+    load();
+    const timer = setInterval(load, TRACK_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [idsKey]);
+
+  // Animate at 60fps using the latest data (refs avoid re-running the loop).
+  useEffect(() => {
+    let frame = 0;
+    const draw = () => {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        drawRadar(canvas, {
+          location: { lat, lon },
+          tles: tlesRef.current,
+          tracks: tracksRef.current,
+          now: new Date(),
+        });
+      }
+      frame = requestAnimationFrame(draw);
+    };
+    frame = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(frame);
+  }, [lat, lon]);
+
+  return (
+    <div className="glass glass-hover rounded-2xl p-6">
+      <div className="mb-5 flex items-center gap-2.5">
+        <span className="flex size-9 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-cyan-300">
+          <Radar className="size-4.5" />
+        </span>
+        <h3 className="text-sm font-semibold tracking-wide text-slate-200 uppercase">
+          Live sky radar
+        </h3>
+        <span className="ml-auto inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-300/90">
+          <span className="relative flex size-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+            <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+          </span>
+          live
+        </span>
+      </div>
+
+      <div className="flex flex-col items-center gap-5 lg:flex-row lg:items-start">
+        <div className="relative w-full max-w-[480px] shrink-0">
+          <canvas
+            ref={canvasRef}
+            className="aspect-square w-full"
+            aria-label="Satellite ground-track radar centered on your location"
+          />
+          {status !== "ready" && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 rounded-2xl">
+              {status === "loading" ? (
+                <>
+                  <Loader2 className="size-6 animate-spin text-slate-500" />
+                  <p className="text-xs text-slate-500">Plotting satellites…</p>
+                </>
+              ) : (
+                <>
+                  <Satellite className="size-6 text-slate-500" />
+                  <p className="max-w-60 text-center text-xs text-slate-500">
+                    Couldn&apos;t load satellite positions
+                    {error ? ` — ${error}` : ""}.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="w-full max-w-xs space-y-3 lg:pt-1">
+          <p className="text-xs leading-relaxed text-slate-500">
+            Ground tracks around{" "}
+            <span className="text-slate-300">
+              {formatCoordinates(location.lat, location.lon)}
+            </span>{" "}
+            — past 30 min (dim) and the next 90 min (bright). Positions update
+            live; the dashed ring is the horizon for a ~400 km orbit.
+          </p>
+          <ul className="space-y-2">
+            {tles.map((tle, index) => (
+              <li key={tle.noradId} className="flex items-center gap-2.5">
+                <span
+                  className="size-2.5 rounded-full"
+                  style={{
+                    backgroundColor: COLORS[index % COLORS.length],
+                    boxShadow: `0 0 8px ${COLORS[index % COLORS.length]}`,
+                  }}
+                />
+                <span className="text-sm text-slate-200">{tle.name}</span>
+                <span className="mono ml-auto text-[10px] text-slate-500">
+                  NORAD {tle.noradId}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="pt-1 text-[11px] text-slate-600">
+            TLEs from CelesTrak · refreshed every minute
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}

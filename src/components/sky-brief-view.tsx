@@ -9,9 +9,11 @@ import {
   formatCoordinates,
   formatDuration,
   formatTime,
+  timeZoneFor,
 } from "@/lib/utils";
 import { buildTonightBrief } from "@/services/sky/brief";
 import type { LatLon } from "@/types";
+import { NightTimeline } from "./night-timeline";
 
 const AURORA_BADGES: Record<string, { label: string; className: string }> = {
   LOW: {
@@ -28,8 +30,7 @@ const AURORA_BADGES: Record<string, { label: string; className: string }> = {
   },
   STORM: {
     label: "Storm",
-    className:
-      "aurora-glow border-rose-400/40 bg-rose-400/10 text-rose-300",
+    className: "aurora-glow border-rose-400/40 bg-rose-400/10 text-rose-300",
   },
 };
 
@@ -61,18 +62,28 @@ function CardShell({
   );
 }
 
-export async function SkyBriefSection({ location }: { location: LatLon }) {
-  const brief = await buildTonightBrief(location);
+export async function SkyBriefSection({
+  location,
+  noradIds,
+}: {
+  location: LatLon;
+  /** NORAD ids to track; defaults to the server-configured set. */
+  noradIds?: string[];
+}) {
+  const brief = await buildTonightBrief(location, { noradIds });
   const nextPasses = brief.issPasses.slice(0, 3);
   const moon = brief.moon;
+  // All times are rendered in the *location's* timezone, not the server's —
+  // a stargazer in Tokyo sees Tokyo time for when to look up.
+  const tz = timeZoneFor(location.lat, location.lon);
 
   return (
     <div className="space-y-4">
       <div className="grid gap-4 md:grid-cols-3">
-        {/* ISS passes */}
+        {/* Satellite passes */}
         <CardShell
           icon={<Satellite className="size-4.5" />}
-          title="ISS Passes"
+          title="Satellite Passes"
           accent="text-cyan-300"
         >
           {nextPasses.length === 0 ? (
@@ -84,19 +95,26 @@ export async function SkyBriefSection({ location }: { location: LatLon }) {
               {nextPasses.map((pass, index) => (
                 <li
                   key={index}
-                  className="flex items-baseline gap-2 border-b border-white/5 pb-3 last:border-0 last:pb-0"
+                  className="border-b border-white/5 pb-3 last:border-0 last:pb-0"
                 >
-                  <span className="mono text-sm font-semibold text-cyan-200">
-                    {formatTime(pass.start)}
-                  </span>
-                  <span className="text-xs text-slate-500">→</span>
-                  <span className="mono text-xs text-slate-400">
-                    {formatTime(pass.end)}
-                  </span>
-                  <span className="mono ml-auto shrink-0 text-xs text-slate-500">
-                    max {pass.maxElevationDeg}° ·{" "}
-                    {formatDuration(pass.durationMinutes)}
-                  </span>
+                  {pass.satelliteName && (
+                    <span className="mb-1 block text-[10px] tracking-wide text-slate-500 uppercase">
+                      {pass.satelliteName}
+                    </span>
+                  )}
+                  <div className="flex items-baseline gap-2">
+                    <span className="mono text-sm font-semibold text-cyan-200">
+                      {formatTime(pass.start, tz)}
+                    </span>
+                    <span className="text-xs text-slate-500">→</span>
+                    <span className="mono text-xs text-slate-400">
+                      {formatTime(pass.end, tz)}
+                    </span>
+                    <span className="mono ml-auto shrink-0 text-xs text-slate-500">
+                      max {pass.maxElevationDeg}° ·{" "}
+                      {formatDuration(pass.durationMinutes)}
+                    </span>
+                  </div>
                 </li>
               ))}
             </ul>
@@ -252,7 +270,7 @@ export async function SkyBriefSection({ location }: { location: LatLon }) {
                 Moonrise
               </p>
               <p className="mono mt-1 text-sm text-slate-200">
-                {moon.moonrise ? formatTime(moon.moonrise) : "—"}
+                {moon.moonrise ? formatTime(moon.moonrise, tz) : "—"}
               </p>
             </div>
             <div className="rounded-xl border border-white/5 bg-white/[0.03] p-3">
@@ -260,7 +278,7 @@ export async function SkyBriefSection({ location }: { location: LatLon }) {
                 Moonset
               </p>
               <p className="mono mt-1 text-sm text-slate-200">
-                {moon.moonset ? formatTime(moon.moonset) : "—"}
+                {moon.moonset ? formatTime(moon.moonset, tz) : "—"}
               </p>
             </div>
             <div className="rounded-xl border border-white/5 bg-white/[0.03] p-3">
@@ -284,9 +302,9 @@ export async function SkyBriefSection({ location }: { location: LatLon }) {
               </p>
             ) : moon.bestViewingWindow ? (
               <p className="mono mt-1 text-lg font-semibold text-indigo-200">
-                {formatTime(moon.bestViewingWindow.start)}
+                {formatTime(moon.bestViewingWindow.start, tz)}
                 <span className="mx-1 text-xs text-slate-500">→</span>
-                {formatTime(moon.bestViewingWindow.end)}
+                {formatTime(moon.bestViewingWindow.end, tz)}
               </p>
             ) : (
               <p className="mt-1 text-sm text-slate-300">
@@ -300,13 +318,21 @@ export async function SkyBriefSection({ location }: { location: LatLon }) {
                     moon.bestViewingWindow.start.getTime()) /
                     60_000,
                 )}{" "}
-                of moon-free sky — the dark window between moonset and
-                moonrise.
+                of moon-free sky — the dark window between moonset and moonrise.
               </p>
             )}
           </div>
         </div>
       </div>
+
+      {/* Night timeline */}
+      <NightTimeline
+        location={location}
+        now={brief.generatedAt}
+        moon={moon}
+        passes={brief.issPasses}
+        showers={brief.showers}
+      />
 
       {/* Section footer */}
       <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
@@ -315,6 +341,7 @@ export async function SkyBriefSection({ location }: { location: LatLon }) {
           {brief.generatedAt.toLocaleTimeString([], {
             hour: "2-digit",
             minute: "2-digit",
+            timeZone: tz,
           })}
         </span>
         {brief.errors.length > 0 && (

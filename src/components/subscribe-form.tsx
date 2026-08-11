@@ -9,8 +9,8 @@ import type { LatLon } from "@/types";
 const EVENT_OPTIONS = [
   {
     id: "iss",
-    label: "ISS passes",
-    description: "When the station flies overhead",
+    label: "Satellite passes",
+    description: "When the ISS flies overhead",
   },
   {
     id: "aurora",
@@ -29,6 +29,7 @@ export function SubscribeSection({ location }: { location: LatLon }) {
   const [events, setEvents] = useState<string[]>(["iss", "aurora", "showers"]);
   const [submitting, setSubmitting] = useState(false);
   const [subscribed, setSubscribed] = useState(false);
+  const [pendingVerification, setPendingVerification] = useState(false);
 
   const toggle = (id: string) => {
     setEvents((previous) =>
@@ -66,8 +67,13 @@ export function SubscribeSection({ location }: { location: LatLon }) {
       if (!response.ok) {
         throw new Error(body?.error?.message ?? "Couldn't subscribe.");
       }
-      setSubscribed(true);
-      toast.success("You're on the list!");
+      if (body?.data?.verified) {
+        setSubscribed(true);
+        toast.success("You're on the list!");
+      } else {
+        setPendingVerification(true);
+        toast.success("Confirmation email sent!");
+      }
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Couldn't subscribe.",
@@ -76,6 +82,22 @@ export function SubscribeSection({ location }: { location: LatLon }) {
       setSubmitting(false);
     }
   };
+
+  if (pendingVerification) {
+    return (
+      <div className="glass mx-auto flex max-w-md flex-col items-center rounded-2xl p-10 text-center">
+        <Mail className="size-10 text-cyan-300" />
+        <h3 className="mt-4 text-lg font-semibold text-slate-100">
+          Confirm your email
+        </h3>
+        <p className="mt-2 text-sm leading-relaxed text-slate-400">
+          We sent a confirmation link to{" "}
+          <span className="text-slate-200">{email}</span>. Alerts start as soon
+          as you click it — and you can unsubscribe anytime from any email.
+        </p>
+      </div>
+    );
+  }
 
   if (subscribed) {
     return (
@@ -93,8 +115,8 @@ export function SubscribeSection({ location }: { location: LatLon }) {
             )
             .filter(Boolean)
             .join(", ")}{" "}
-          will arrive at <span className="text-slate-200">{email}</span>. The
-          email sender is wired up in the next milestone.
+          will arrive at <span className="text-slate-200">{email}</span>. Every
+          email includes a one-click unsubscribe link.
         </p>
       </div>
     );

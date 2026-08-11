@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { LOCATION_STORAGE_KEY } from "./remembered-location";
 
 export function LocateButton({ className }: { className?: string }) {
   const router = useRouter();
@@ -20,6 +21,15 @@ export function LocateButton({ className }: { className?: string }) {
     navigator.geolocation.getCurrentPosition(
       (position) => {
         const { latitude, longitude } = position.coords;
+        // Remember the location so returning visitors skip the default city.
+        try {
+          window.localStorage.setItem(
+            LOCATION_STORAGE_KEY,
+            JSON.stringify({ lat: latitude, lon: longitude }),
+          );
+        } catch {
+          // Storage unavailable — the URL still carries the location.
+        }
         router.push(
           `/?lat=${latitude.toFixed(4)}&lon=${longitude.toFixed(4)}#tonight`,
         );

@@ -13,6 +13,8 @@ export interface IssPass {
   /** Compass azimuth (0-360, true north) at the moment of max elevation. */
   maxAzimuthDeg: number;
   durationMinutes: number;
+  /** Satellite name from the TLE, e.g. "ISS (ZARYA)". Set by the brief builder. */
+  satelliteName?: string;
 }
 
 export type AuroraLevel = "LOW" | "MODERATE" | "HIGH" | "STORM";
