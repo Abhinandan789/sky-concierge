@@ -54,11 +54,11 @@ export function formatDuration(minutes: number) {
   return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
 }
 
-/** Format coordinates like "40.71° N, 74.01° W". */
+/** Format coordinates like "40.713° N, 74.006° W" (~110 m precision). */
 export function formatCoordinates(lat: number, lon: number) {
   const latDir = lat >= 0 ? "N" : "S";
   const lonDir = lon >= 0 ? "E" : "W";
-  return `${Math.abs(lat).toFixed(2)}° ${latDir}, ${Math.abs(lon).toFixed(2)}° ${lonDir}`;
+  return `${Math.abs(lat).toFixed(3)}° ${latDir}, ${Math.abs(lon).toFixed(3)}° ${lonDir}`;
 }
 
 const COMPASS_POINTS = [

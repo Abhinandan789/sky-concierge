@@ -5,7 +5,10 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { LOCATION_STORAGE_KEY } from "./remembered-location";
+import {
+  LOCATION_STORAGE_KEY,
+  locationToUrl,
+} from "./remembered-location";
 
 export function LocateButton({ className }: { className?: string }) {
   const router = useRouter();
@@ -33,9 +36,7 @@ export function LocateButton({ className }: { className?: string }) {
         // router.push re-renders the same page — without this, the button
         // would keep its spinner forever even though the location arrived.
         setLoading(false);
-        router.push(
-          `/?lat=${latitude.toFixed(4)}&lon=${longitude.toFixed(4)}#tonight`,
-        );
+        router.push(locationToUrl(latitude, longitude));
       },
       () => {
         setLoading(false);
@@ -43,7 +44,9 @@ export function LocateButton({ className }: { className?: string }) {
           "Couldn't access your location — you can still browse the default city.",
         );
       },
-      { enableHighAccuracy: false, timeout: 10_000 },
+      // High accuracy uses GPS/Wi-Fi fixes when available — the sky is
+      // computed from these exact numbers, so precision matters.
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
     );
   };
 

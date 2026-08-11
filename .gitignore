@@ -30,6 +30,7 @@ next-env.d.ts
 # editor
 .vscode/
 .idea/
+.vs/
 
 # freebuff agent state
 .freebuff/
