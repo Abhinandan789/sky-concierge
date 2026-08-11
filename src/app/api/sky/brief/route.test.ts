@@ -79,7 +79,9 @@ describe("GET /api/sky/brief", () => {
     expect(Array.isArray(body.data.issPasses)).toBe(true);
   });
 
-  it("rate limits repeated requests from one IP", async () => {
+  // 61 sequential stubbed requests are slow when the whole suite runs in
+  // parallel on a slow filesystem — give it room so it doesn't flake.
+  it("rate limits repeated requests from one IP", { timeout: 20_000 }, async () => {
     stubOfflineFetch();
     const ip = "198.51.100.9";
     let lastStatus = 0;
