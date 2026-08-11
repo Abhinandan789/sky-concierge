@@ -4,7 +4,7 @@ import { jsonError, jsonOk } from "@/lib/api";
 import { clientIp, RateLimiter } from "@/lib/rate-limit";
 import { getDb, upsertSubscription } from "@/lib/db";
 import { isEmail, parseNumber, validateLatLon } from "@/lib/utils";
-import { siteUrl } from "@/config/site";
+
 import { parseSatelliteIds } from "@/config/satellites";
 import { createSender } from "@/services/alerts/sender";
 import { ALERT_EVENT_TYPES, type AlertEventType } from "@/types";
@@ -127,7 +127,11 @@ export async function POST(request: NextRequest) {
       needsVerification &&
       (!subscription.verified || subscription.pendingChange)
     ) {
-      const confirmUrl = `${siteUrl()}/verify?token=${subscription.verifyToken}`;
+      // Use the request's own origin unless SITE_URL is configured, so
+      // confirmation links always point at the server the visitor is on
+      // (dev servers rarely run on the localhost:3000 default).
+      const baseUrl = process.env.SITE_URL ?? new URL(request.url).origin;
+      const confirmUrl = `${baseUrl}/verify?token=${subscription.verifyToken}`;
       try {
         await createSender().send(email, {
           subject: subscription.pendingChange
