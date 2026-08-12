@@ -131,8 +131,29 @@ Without keys, push is silently skipped.
 pnpm check:alerts --digest   # weekly highlights email, deduped per ISO week
 ```
 
-Run the digest on a weekly cron (a Vercel Cron that runs the script once a
-week works well).
+### Scheduled alert checks (cron)
+
+`vercel.json` wires Vercel Cron to hit `GET /api/cron/alerts` once a day at
+18:00 UTC (Vercel Hobby accounts are limited to daily crons — a `*/5 * * * *`
+schedule fails the deploy). The route calls the same `runAlertCheck()` engine
+as `pnpm check:alerts`, and `?digest=1` runs the weekly digest — its ISO-week
+dedup means it only ever sends once per week. Set `CRON_SECRET` in your
+deployment and Vercel sends it as `Authorization: Bearer` on every invocation;
+the route also accepts `?secret=` for manual runs:
+
+```bash
+curl "http://localhost:3000/api/cron/alerts?secret=…"
+```
+
+### Delivery tracking (webhook)
+
+Point a Resend webhook (Settings → Webhooks → Add endpoint) at
+`{SITE_URL}/api/webhooks/resend`, subscribe to `email.delivered` +
+`email.bounced`, and paste its signing secret into `RESEND_WEBHOOK_SECRET`.
+Every event is logged to the `email_events` table; permanent bounces (and
+spam complaints) mark the subscription as failed and disable it, so the alert
+engine stops emailing a dead address. Signatures are HMAC-verified when the
+secret is set (dev accepts unsigned requests).
 
 ## Scripts
 
@@ -198,15 +219,15 @@ Key design choices:
 
 ## Data sources
 
-| Source       | Used for                                | Endpoint                               |
-| ------------ | --------------------------------------- | -------------------------------------- |
-| CelesTrak    | Satellite TLEs (TTL-cached)             | `gp.php?CATNR=25544`                   |
-| NOAA SWPC    | Planetary K-index forecast (TTL-cached) | `noaa-planetary-k-index-forecast.json` |
-| Open-Meteo   | Cloud cover (TTL-cached, no API key)    | `api.open-meteo.com/v1/forecast`       |
-| astronomy-   | Planet rise/set, magnitude, conjunctions| (local computation)                    |
-|   engine     |                                       |                                       |
-| SunCalc      | Moon phase, rise/set, dark windows      | (local computation)                    |
-| Resend       | Alert emails                            | `api.resend.com/emails`                |
+| Source     | Used for                                 | Endpoint                               |
+| ---------- | ---------------------------------------- | -------------------------------------- |
+| CelesTrak  | Satellite TLEs (TTL-cached)              | `gp.php?CATNR=25544`                   |
+| NOAA SWPC  | Planetary K-index forecast (TTL-cached)  | `noaa-planetary-k-index-forecast.json` |
+| Open-Meteo | Cloud cover (TTL-cached, no API key)     | `api.open-meteo.com/v1/forecast`       |
+| astronomy- | Planet rise/set, magnitude, conjunctions | (local computation)                    |
+| engine     |                                          |                                        |
+| SunCalc    | Moon phase, rise/set, dark windows       | (local computation)                    |
+| Resend     | Alert emails                             | `api.resend.com/emails`                |
 
 ## Roadmap
 
@@ -226,4 +247,5 @@ Key design choices:
 - [x] Camera follow on the globe (click a satellite, it stays centered)
 - [x] Moon sub-point + ground track overlay (globe + radar)
 - [x] Per-subscriber satellite selections in alert emails
-- [ ] Deployment (Vercel) + cron for the alert engine
+- [x] Deployment (Vercel) + cron for the alert engine
+- [x] Delivery tracking — Resend webhook marks bounced addresses as failed
