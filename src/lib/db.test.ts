@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
+  applyEmailWebhookEvent,
   createSkyDb,
   disableSubscription,
   disablePushSubscription,
   insertAlertLogIfNotExists,
+  listEmailEvents,
   listEnabledPushSubscriptions,
   listEnabledSubscriptions,
   upsertPushSubscription,
@@ -382,6 +384,136 @@ describe("SQLite data layer", () => {
 
     expect(disablePushSubscription(db, endpoint)).toBe(true);
     expect(listEnabledPushSubscriptions(db)).toHaveLength(0);
+  });
+
+  it("marks a permanent bounce as failed and disables the subscription", () => {
+    const db = createSkyDb(":memory:");
+    const { id } = upsertSubscription(db, {
+      email: "bounce@x.co",
+      lat: 40.7,
+      lon: -74,
+      events: "iss",
+    });
+
+    const affected = applyEmailWebhookEvent(db, {
+      email: "bounce@x.co",
+      eventType: "email.bounced",
+      emailId: "email_123",
+      bounceType: "Permanent",
+      detail: "bounce_type=Permanent",
+    });
+
+    expect(affected).toBe(id);
+    const row = db
+      .prepare(
+        `SELECT enabled, email_status AS emailStatus, bounced_at AS bouncedAt
+         FROM alert_subscriptions WHERE email = 'bounce@x.co'`,
+      )
+      .get() as {
+      enabled: number;
+      emailStatus: string;
+      bouncedAt: string | null;
+    };
+    expect(row.enabled).toBe(0);
+    expect(row.emailStatus).toBe("bounced");
+    expect(row.bouncedAt).toBeTruthy();
+    expect(listEnabledSubscriptions(db)).toHaveLength(0);
+
+    // The event itself is tracked in the email_events log.
+    const events = listEmailEvents(db, "bounce@x.co");
+    expect(events).toHaveLength(1);
+    expect(events[0].eventType).toBe("email.bounced");
+    expect(events[0].emailId).toBe("email_123");
+  });
+
+  it("keeps a transient bounce enabled (Resend retries those)", () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "soft@x.co",
+      lat: 1,
+      lon: 2,
+      events: "iss",
+    });
+
+    const affected = applyEmailWebhookEvent(db, {
+      email: "soft@x.co",
+      eventType: "email.bounced",
+      bounceType: "Transient",
+    });
+    expect(affected).toBeTruthy();
+    const row = db
+      .prepare(
+        `SELECT enabled, email_status AS emailStatus
+         FROM alert_subscriptions WHERE email = 'soft@x.co'`,
+      )
+      .get() as { enabled: number; emailStatus: string };
+    expect(row.enabled).toBe(1); // still delivering
+    expect(row.emailStatus).toBe("bounced"); // but the failure is recorded
+  });
+
+  it("disables subscriptions on spam complaints and records deliveries", () => {
+    const db = createSkyDb(":memory:");
+    upsertSubscription(db, {
+      email: "complaint@x.co",
+      lat: 1,
+      lon: 2,
+      events: "iss",
+    });
+    upsertSubscription(db, {
+      email: "happy@x.co",
+      lat: 3,
+      lon: 4,
+      events: "aurora",
+    });
+
+    expect(
+      applyEmailWebhookEvent(db, {
+        email: "complaint@x.co",
+        eventType: "email.complained",
+      }),
+    ).toBeTruthy();
+    expect(
+      applyEmailWebhookEvent(db, {
+        email: "happy@x.co",
+        eventType: "email.delivered",
+        emailId: "email_9",
+      }),
+    ).toBeTruthy();
+
+    const complained = db
+      .prepare(
+        `SELECT enabled, email_status AS emailStatus
+         FROM alert_subscriptions WHERE email = 'complaint@x.co'`,
+      )
+      .get() as { enabled: number; emailStatus: string };
+    expect(complained.enabled).toBe(0);
+    expect(complained.emailStatus).toBe("complained");
+
+    const delivered = db
+      .prepare(
+        `SELECT enabled, email_status AS emailStatus
+         FROM alert_subscriptions WHERE email = 'happy@x.co'`,
+      )
+      .get() as { enabled: number; emailStatus: string };
+    expect(delivered.enabled).toBe(1);
+    expect(delivered.emailStatus).toBe("delivered");
+
+    // Both events are on the log; deliveries land after bounces per address.
+    expect(listEmailEvents(db, "happy@x.co")[0].eventType).toBe(
+      "email.delivered",
+    );
+  });
+
+  it("logs events for addresses without a subscription and returns null", () => {
+    const db = createSkyDb(":memory:");
+    expect(
+      applyEmailWebhookEvent(db, {
+        email: "ghost@x.co",
+        eventType: "email.bounced",
+        bounceType: "Permanent",
+      }),
+    ).toBeNull();
+    expect(listEmailEvents(db, "ghost@x.co")).toHaveLength(1);
   });
 
   it("migrates legacy (email, lat, lon) databases to one row per email", () => {

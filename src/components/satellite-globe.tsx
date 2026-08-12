@@ -10,6 +10,7 @@ import {
   observerLookAngles,
   type GroundTrackPoint,
 } from "@/lib/satellite-map";
+import { gstime } from "satellite.js";
 import type { LatLon } from "@/types";
 import type { MoonTrack, MoonTrackPoint } from "@/services/sky/moon-track";
 import * as THREE from "three";
@@ -49,6 +50,96 @@ const MOON_PAST_WINDOW_MS = 30 * 60_000;
 const MOON_FUTURE_WINDOW_MS = 60 * 60_000;
 /** How often the moon marker/path re-anchors to the live sub-point. */
 const MOON_ADVANCE_MS = 1_000;
+
+/* ----------------------------------------------------------------------- */
+/* Visual tuning — satellite dot, ground track and direction-of-travel     */
+/* comet. One place to pull all the glow brightness / pulse knobs.         */
+/* ----------------------------------------------------------------------- */
+
+/** Live dot: hot white core + pulsing colored halo. */
+const DOT_CORE_SCALE = 0.06;
+/** Resting halo size for an unselected satellite (breathes ± amplitude). */
+const DOT_HALO_BASE_SCALE = 0.14;
+/** Selected (locked-on) satellites breathe a bit bigger. */
+const DOT_HALO_SELECTED_SCALE = 0.22;
+const DOT_HALO_PULSE_AMPLITUDE = 0.05;
+const DOT_HALO_OPACITY_BASE = 0.2;
+const DOT_HALO_OPACITY_PULSE = 0.35;
+/** Halo pulse period (ms) — the dot's "live beacon" flicker. */
+const DOT_HALO_PULSE_PERIOD_MS = 280;
+
+/** Ground track split at the live dot: dim past, bright future. */
+const TRACK_PAST_OPACITY = 0.18;
+const TRACK_FUTURE_OPACITY = 0.6;
+
+/** Direction-of-travel comet — a bright leading edge with a fading trail
+ * that pushes forward along the future track, then loops back to the dot.
+ * One-directional: the light only ever moves forward along the path. */
+const COMET_TRAIL_COUNT = 8;
+/** Head (leading) sprite size; the trail shrinks behind it. */
+const COMET_HEAD_SCALE = 0.09;
+const COMET_TRAIL_SCALE = 0.04;
+/** Head-to-tail length of the comet, in degrees of arc along the track. */
+const COMET_LENGTH_DEG = 14;
+/** How far ahead of the dot the head sweeps before looping back. */
+const COMET_SWEEP_DEG = 24;
+/** Forward speed of the head along the track, degrees/second. Kept calm —
+ * at 0.8°/s the full sweep takes ~30 s, reading as a slow trailing light. */
+const COMET_SPEED_DEG_S = 0.8;
+/** Head opacity; each ember behind it fades toward zero. */
+const COMET_HEAD_OPACITY = 0.5;
+/** Arc (degrees) over which the comet fades in after respawning. */
+const COMET_SPAWN_FADE_DEG = 2.5;
+
+/** Moon path comet — the same one-way trailing treatment, sized to the
+ * Moon's slow ~15°/hour westward drift (its future window is only ~15° of
+ * arc, so the sweep stays short and calm). */
+const MOON_COMET_TRAIL_COUNT = 6;
+const MOON_COMET_HEAD_SCALE = 0.085;
+const MOON_COMET_TRAIL_SCALE = 0.035;
+const MOON_COMET_LENGTH_DEG = 3;
+const MOON_COMET_SWEEP_DEG = 4.5;
+const MOON_COMET_SPEED_DEG_S = 0.35;
+const MOON_COMET_HEAD_OPACITY = 0.45;
+const MOON_COMET_SPAWN_FADE_DEG = 1.5;
+
+/**
+ * Walk a polyline from `start` and record the position at each target arc
+ * distance (radians, sorted ascending). Targets beyond the polyline's end
+ * are pinned to its last vertex. Returns the total arc length from `start`
+ * to `end`. Used by the direction-of-travel comet to place its head + tail
+ * embers exactly on the ground track.
+ */
+export function sampleTrackArc(
+  pts: Float32Array,
+  start: number,
+  end: number,
+  targets: number[],
+  out: THREE.Vector3[],
+  scratchPrev: THREE.Vector3,
+  scratchCur: THREE.Vector3,
+): number {
+  let total = 0;
+  let ti = 0;
+  scratchPrev.set(pts[start * 3], pts[start * 3 + 1], pts[start * 3 + 2]);
+  out[0].copy(scratchPrev);
+  for (let i = start + 1; i < end && ti < targets.length; i += 1) {
+    scratchCur.set(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]);
+    const seg = scratchPrev.distanceTo(scratchCur);
+    const next = total + seg;
+    while (ti < targets.length && targets[ti] <= next) {
+      const t = (targets[ti] - total) / Math.max(seg, 1e-9);
+      out[ti].copy(scratchPrev).lerp(scratchCur, t);
+      ti += 1;
+    }
+    total = next;
+    scratchPrev.copy(scratchCur);
+  }
+  for (; ti < targets.length; ti += 1) {
+    out[ti].copy(scratchCur);
+  }
+  return total;
+}
 
 /**
  * Linear sub-point between two 10-minute track samples, longitude wrap-safe.
@@ -121,7 +212,9 @@ function slerpUnit(
     axis.crossVectors(from, axis).normalize();
     out
       .copy(from)
-      .applyQuaternion(new THREE.Quaternion().setFromAxisAngle(axis, theta * t));
+      .applyQuaternion(
+        new THREE.Quaternion().setFromAxisAngle(axis, theta * t),
+      );
     return;
   }
   const sinTheta = Math.sin(theta);
@@ -132,14 +225,24 @@ function slerpUnit(
     .normalize();
 }
 
-/** Earth-fixed lat/lon (+ altitude) → position inside the globe group. */
-function latLonAltToVector3(
+/**
+ * Earth-fixed lat/lon (+ altitude) → position inside the globe group.
+ *
+ * The texture is a standard equirectangular map (left edge = −180°, 0° at
+ * the image center), and three.js maps the texture's left edge (u=0) to the
+ * sphere's −x axis. A point at longitude L therefore sits at azimuth −L
+ * (Greenwich on +x, the date line on −x). The earlier (lon + 180) formula
+ * rotated every marker a full 180° the wrong way — the observer dot, moon
+ * ring and all satellite sub-points landed on the opposite side of the
+ * planet from where the texture shows them.
+ */
+export function latLonAltToVector3(
   lat: number,
   lon: number,
   altitudeKm: number,
 ): THREE.Vector3 {
   const phi = (90 - lat) * (Math.PI / 180);
-  const theta = (lon + 180) * (Math.PI / 180);
+  const theta = (-lon * Math.PI) / 180;
   const radius = 1 + altitudeKm / EARTH_RADIUS_KM;
   return new THREE.Vector3(
     radius * Math.sin(phi) * Math.cos(theta),
@@ -240,6 +343,10 @@ interface GlobeSatellite {
   /** Live dot: hot white core + pulsing colored halo. */
   core: THREE.Sprite;
   halo: THREE.Sprite;
+  /** One-way direction-of-travel comet — bright head, fading tail. */
+  cometTrail: THREE.Sprite[];
+  /** Distance the comet head has traveled ahead of the dot (radians). */
+  cometDist: number;
 }
 
 /** Build a satellite's scene objects from its TLE. */
@@ -263,18 +370,34 @@ function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
   const futureGeometry = makeGeometry();
   const pastLine = new THREE.Line(
     pastGeometry,
-    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.3 }),
+    new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity: TRACK_PAST_OPACITY,
+    }),
   );
   const futureLine = new THREE.Line(
     futureGeometry,
-    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 }),
+    new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity: TRACK_FUTURE_OPACITY,
+    }),
   );
 
   const core = makeGlowSprite(color);
-  core.scale.set(0.075, 0.075, 1);
+  core.scale.set(DOT_CORE_SCALE, DOT_CORE_SCALE, 1);
   core.userData = { noradId: tle.noradId };
   const halo = makeGlowSprite(color);
-  halo.scale.set(0.22, 0.22, 1);
+  halo.scale.set(DOT_HALO_BASE_SCALE, DOT_HALO_BASE_SCALE, 1);
+  // Direction-of-travel comet — a bright leading edge with a fading trail
+  // riding the bright (future) track ahead of the dot. Positioned, scaled
+  // and faded by the animate loop; it only ever moves forward.
+  const cometTrail = Array.from({ length: COMET_TRAIL_COUNT }, () => {
+    const sprite = makeGlowSprite(color);
+    sprite.scale.set(COMET_HEAD_SCALE, COMET_HEAD_SCALE, 1);
+    return sprite;
+  });
 
   return {
     tle,
@@ -285,6 +408,8 @@ function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
     futureLine,
     core,
     halo,
+    cometTrail,
+    cometDist: 0,
   };
 }
 
@@ -363,6 +488,14 @@ function createGlobeView(
 
   // Earth + night-lights texture, plus a faint atmospheric halo.
   const earthGroup = new THREE.Group();
+  // The globe starts rotated to the real sky: GMST is how far the Earth has
+  // turned since the texture's reference frame, so initializing the group's
+  // rotation to it puts every ECEF-placed marker (the "you" dot, satellite
+  // sub-points, moon ring and ground tracks) over the correct spot on the
+  // map, and keeps satellites fixed in inertial space as the planet revolves.
+  // Without this the whole scene is displaced by the current GMST (~45°+
+  // depending on the time of day) — dots appear over the wrong continents.
+  earthGroup.rotation.y = gstime(new Date());
   const texture = new THREE.TextureLoader().load("/earth-night.jpg");
   texture.colorSpace = THREE.SRGBColorSpace;
   earthGroup.add(
@@ -396,6 +529,14 @@ function createGlobeView(
   let moonFutureLine: THREE.Line | null = null;
   let moonTrack: MoonTrack | null = null;
   let lastMoonAdvanceAt = 0;
+  // Moon path comet — one-way leading-edge sweep along its bright (future)
+  // path. `moonFutureStart`/`moonFutureEnd` are the drawn future vertex
+  // range (updated on every path advance), so the comet always samples the
+  // same polyline the line is drawn from.
+  let moonCometTrail: THREE.Sprite[] = [];
+  let moonCometDist = 0;
+  let moonFutureStart = 0;
+  let moonFutureEnd = 0;
   // View lock: when a satellite is selected the camera rotates (on a sphere
   // around the globe's center) to bring the dot to the middle of the screen
   // and keep it there as it orbits — the globe itself never shifts.
@@ -407,7 +548,13 @@ function createGlobeView(
 
   const updateSatellites = (tles: TleEntry[]) => {
     for (const sat of sats.values()) {
-      earthGroup.remove(sat.pastLine, sat.futureLine, sat.core, sat.halo);
+      earthGroup.remove(
+        sat.pastLine,
+        sat.futureLine,
+        sat.core,
+        sat.halo,
+        ...sat.cometTrail,
+      );
       sat.pastGeometry.dispose();
       sat.futureGeometry.dispose();
       (sat.pastLine.material as THREE.Material).dispose();
@@ -416,12 +563,22 @@ function createGlobeView(
       (sat.core.material as THREE.Material).dispose();
       (sat.halo.material as THREE.SpriteMaterial).map?.dispose();
       (sat.halo.material as THREE.Material).dispose();
+      for (const sprite of sat.cometTrail) {
+        (sprite.material as THREE.SpriteMaterial).map?.dispose();
+        (sprite.material as THREE.Material).dispose();
+      }
     }
     sats.clear();
 
     tles.forEach((tle, index) => {
       const sat = buildSatellite(tle, index);
-      earthGroup.add(sat.pastLine, sat.futureLine, sat.core, sat.halo);
+      earthGroup.add(
+        sat.pastLine,
+        sat.futureLine,
+        sat.core,
+        sat.halo,
+        ...sat.cometTrail,
+      );
       sats.set(tle.noradId, sat);
     });
   };
@@ -453,9 +610,16 @@ function createGlobeView(
         (object.material as THREE.SpriteMaterial).map?.dispose();
       }
     }
+    for (const sprite of moonCometTrail) {
+      earthGroup.remove(sprite);
+      (sprite.material as THREE.SpriteMaterial).map?.dispose();
+      (sprite.material as THREE.Material).dispose();
+    }
     moonMarker = null;
     moonPastLine = null;
     moonFutureLine = null;
+    moonCometTrail = [];
+    moonCometDist = 0;
 
     // Marker at the current sub-point, just above the surface.
     moonMarker = makeRingSprite(MOON_COLOR);
@@ -510,6 +674,18 @@ function createGlobeView(
     moonFutureLine = makeLine(0.55);
     moonFutureLine.geometry.setDrawRange(split, end - split);
     earthGroup.add(moonPastLine, moonFutureLine);
+
+    // Direction-of-travel comet for the Moon: a bright leading edge with a
+    // fading trail sweeping forward along its bright (future) path — the
+    // same one-way treatment the satellites get, sized to its slow drift.
+    moonFutureStart = split;
+    moonFutureEnd = end;
+    moonCometTrail = Array.from({ length: MOON_COMET_TRAIL_COUNT }, () => {
+      const sprite = makeGlowSprite(MOON_COLOR);
+      sprite.scale.set(MOON_COMET_HEAD_SCALE, MOON_COMET_HEAD_SCALE, 1);
+      earthGroup.add(sprite);
+      return sprite;
+    });
   };
 
   const setSelected = (id: string | null) => {
@@ -587,13 +763,30 @@ function createGlobeView(
   });
 
   const clock = new THREE.Clock();
+  // Scratch buffers for the direction-of-travel comet (avoid per-frame
+  // allocations in the animate loop).
+  const cometTrailPositions = Array.from(
+    { length: COMET_TRAIL_COUNT },
+    () => new THREE.Vector3(),
+  );
+  const cometTargets = new Array<number>(COMET_TRAIL_COUNT);
+  const cometScratchPrev = new THREE.Vector3();
+  const cometScratchCur = new THREE.Vector3();
+  // Same scratch buffers for the Moon's path comet.
+  const moonCometPositions = Array.from(
+    { length: MOON_COMET_TRAIL_COUNT },
+    () => new THREE.Vector3(),
+  );
+  const moonCometTargets = new Array<number>(MOON_COMET_TRAIL_COUNT);
   let frame = 0;
   let lastTelemetryAt = 0;
   const animate = () => {
     frame = requestAnimationFrame(animate);
     const delta = clock.getDelta();
     // The globe rotates at Earth's real sidereal rate — satellites orbit in
-    // inertial space, so the planet genuinely revolves beneath them.
+    // inertial space, so the planet genuinely revolves beneath them. Starting
+    // from the GMST at load (see earthGroup init) keeps the map aligned with
+    // the real sky.
     earthGroup.rotation.y += SIDEREAL_RATE * delta;
 
     const nowMs = Date.now();
@@ -615,12 +808,17 @@ function createGlobeView(
       sat.halo.position.copy(blipPos);
 
       // Pulse the halo so the satellite reads as a live beacon; the selected
-      // satellite breathes bigger so it stands out from the rest.
-      const pulse = 0.5 + 0.5 * Math.sin(nowMs / 280);
-      const base = sat.tle.noradId === selectedId ? 0.3 : 0.2;
-      const haloScale = base + 0.08 * pulse;
+      // satellite breathes bigger so it stands out from the rest. Kept
+      // subdued so the glow doesn't outshine the track it's riding.
+      const pulse = 0.5 + 0.5 * Math.sin(nowMs / DOT_HALO_PULSE_PERIOD_MS);
+      const base =
+        sat.tle.noradId === selectedId
+          ? DOT_HALO_SELECTED_SCALE
+          : DOT_HALO_BASE_SCALE;
+      const haloScale = base + DOT_HALO_PULSE_AMPLITUDE * pulse;
       sat.halo.scale.set(haloScale, haloScale, 1);
-      (sat.halo.material as THREE.SpriteMaterial).opacity = 0.3 + 0.5 * pulse;
+      (sat.halo.material as THREE.SpriteMaterial).opacity =
+        DOT_HALO_OPACITY_BASE + DOT_HALO_OPACITY_PULSE * pulse;
 
       // Re-anchor the ground track to the live position every frame: the
       // split index moves forward in time and the boundary vertices are
@@ -653,6 +851,67 @@ function createGlobeView(
       sat.futureGeometry.attributes.position.needsUpdate = true;
       sat.pastGeometry.setDrawRange(0, k);
       sat.futureGeometry.setDrawRange(k, sat.times.length - k);
+
+      // Direction-of-travel comet: a bright leading edge with a fading trail
+      // that pushes forward along the bright (future) line ahead of the dot,
+      // then loops back to the dot for another sweep. One-directional — the
+      // light never moves backwards, so the path's direction reads at a
+      // glance. It samples the same polyline the line is drawn from, so it
+      // always rides the actual track.
+      const n = sat.times.length;
+      if (k < n - 1) {
+        const radPerDeg = Math.PI / 180;
+        sat.cometDist += COMET_SPEED_DEG_S * radPerDeg * delta;
+        const sweepArc = COMET_SWEEP_DEG * radPerDeg;
+        if (sat.cometDist >= sweepArc) {
+          sat.cometDist = 0; // reached the sweep limit — start over at the dot
+        }
+        // Arc distances from the live point, tail → head (ascending), so the
+        // sampler can place every ember in a single walk over the polyline.
+        const step =
+          (COMET_LENGTH_DEG * radPerDeg) / (COMET_TRAIL_COUNT - 1);
+        for (let i = 0; i < COMET_TRAIL_COUNT; i += 1) {
+          cometTargets[i] = Math.max(
+            0,
+            sat.cometDist - (COMET_TRAIL_COUNT - 1 - i) * step,
+          );
+        }
+        sampleTrackArc(
+          sat.futureGeometry.attributes.position.array as Float32Array,
+          k,
+          n,
+          cometTargets,
+          cometTrailPositions,
+          cometScratchPrev,
+          cometScratchCur,
+        );
+        // Fade in right after looping so the respawn isn't a hard pop.
+        const spawnFade = Math.min(
+          1,
+          sat.cometDist / (COMET_SPAWN_FADE_DEG * radPerDeg),
+        );
+        for (let i = 0; i < COMET_TRAIL_COUNT; i += 1) {
+          const sprite = sat.cometTrail[i];
+          // cometTrailPositions holds tail → head, so the leading edge
+          // (sprite 0) maps to the last sampled point.
+          sprite.visible = true;
+          sprite.position.copy(
+            cometTrailPositions[COMET_TRAIL_COUNT - 1 - i],
+          );
+          const trail = i / (COMET_TRAIL_COUNT - 1);
+          const scale =
+            COMET_HEAD_SCALE +
+            (COMET_TRAIL_SCALE - COMET_HEAD_SCALE) * trail;
+          sprite.scale.set(scale, scale, 1);
+          (sprite.material as THREE.SpriteMaterial).opacity =
+            COMET_HEAD_OPACITY * spawnFade * Math.pow(1 - trail, 1.5);
+        }
+      } else {
+        // No future vertices left in the track window — nothing to sweep.
+        for (const sprite of sat.cometTrail) {
+          sprite.visible = false;
+        }
+      }
     }
 
     // The Moon's sub-point drifts ~15°/hour west — advance the marker and pin
@@ -717,6 +976,61 @@ function createGlobeView(
       moonFutureLine.geometry.attributes.position.needsUpdate = true;
       moonPastLine.geometry.setDrawRange(start, split - start);
       moonFutureLine.geometry.setDrawRange(split, end - split);
+      moonFutureStart = split;
+      moonFutureEnd = end;
+    }
+
+    // Moon path comet — same one-way leading-edge sweep as the satellites:
+    // the bright head pushes forward along the Moon's (westward) path and
+    // loops back to the ring, so the drift direction reads at a glance.
+    if (moonFutureLine && moonFutureStart < moonFutureEnd - 1) {
+      const radPerDeg = Math.PI / 180;
+      moonCometDist += MOON_COMET_SPEED_DEG_S * radPerDeg * delta;
+      const sweepArc = MOON_COMET_SWEEP_DEG * radPerDeg;
+      if (moonCometDist >= sweepArc) {
+        moonCometDist = 0;
+      }
+      const step =
+        (MOON_COMET_LENGTH_DEG * radPerDeg) / (MOON_COMET_TRAIL_COUNT - 1);
+      for (let i = 0; i < MOON_COMET_TRAIL_COUNT; i += 1) {
+        moonCometTargets[i] = Math.max(
+          0,
+          moonCometDist - (MOON_COMET_TRAIL_COUNT - 1 - i) * step,
+        );
+      }
+      const moonPts = moonFutureLine.geometry.attributes.position
+        .array as Float32Array;
+      sampleTrackArc(
+        moonPts,
+        moonFutureStart,
+        moonFutureEnd,
+        moonCometTargets,
+        moonCometPositions,
+        cometScratchPrev,
+        cometScratchCur,
+      );
+      const spawnFade = Math.min(
+        1,
+        moonCometDist / (MOON_COMET_SPAWN_FADE_DEG * radPerDeg),
+      );
+      for (let i = 0; i < MOON_COMET_TRAIL_COUNT; i += 1) {
+        const sprite = moonCometTrail[i];
+        sprite.visible = true;
+        sprite.position.copy(
+          moonCometPositions[MOON_COMET_TRAIL_COUNT - 1 - i],
+        );
+        const trail = i / (MOON_COMET_TRAIL_COUNT - 1);
+        const scale =
+          MOON_COMET_HEAD_SCALE +
+          (MOON_COMET_TRAIL_SCALE - MOON_COMET_HEAD_SCALE) * trail;
+        sprite.scale.set(scale, scale, 1);
+        (sprite.material as THREE.SpriteMaterial).opacity =
+          MOON_COMET_HEAD_OPACITY * spawnFade * Math.pow(1 - trail, 1.5);
+      }
+    } else if (moonCometTrail.length > 0) {
+      for (const sprite of moonCometTrail) {
+        sprite.visible = false;
+      }
     }
 
     // Center-on-you: one-shot swing toward the observer's spot.
@@ -754,7 +1068,10 @@ function createGlobeView(
         const angle = cameraDir.angleTo(targetDir);
         // Cap the swing at ~0.8°/frame so a full rotation is a slow, smooth
         // arc instead of a snap; the easing handles the final settle.
-        const step = Math.min(0.02, (0.8 * Math.PI) / 180 / Math.max(angle, 1e-6));
+        const step = Math.min(
+          0.02,
+          (0.8 * Math.PI) / 180 / Math.max(angle, 1e-6),
+        );
         slerpUnit(cameraDir, cameraDir, targetDir, step);
         camera.position.copy(cameraDir).multiplyScalar(cameraDistance);
         camera.up.copy(up);
@@ -863,6 +1180,9 @@ export function SatelliteGlobe({
 }: SatelliteGlobeProps) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<GlobeView | null>(null);
+  // Location the current scene was last centered on — null means the scene is
+  // fresh and should swing the camera to the observer on the next effect pass.
+  const lastAppliedLocationRef = useRef<LatLon | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">(
     "loading",
   );
@@ -881,11 +1201,16 @@ export function SatelliteGlobe({
 
   // Create the scene once (client-only; the component is lazy-loaded). The
   // useState setters are stable across renders, so they can be captured
-  // directly by the once-created scene.
+  // directly by the once-created scene. In dev, StrictMode disposes and
+  // recreates this scene between effect passes — clearing the last-applied
+  // location marks the fresh scene as un-centered so the location effect
+  // below swings the camera to the observer on it (it never fires on a live
+  // scene whose location hasn't changed).
   useEffect(() => {
     if (!mountRef.current || viewRef.current) {
       return;
     }
+    lastAppliedLocationRef.current = null;
     viewRef.current = createGlobeView(mountRef.current, {
       onSelect: onFocusChangeRef.current,
       onTelemetry: setTelemetry,
@@ -971,6 +1296,24 @@ export function SatelliteGlobe({
     }
   }, [tles, lat, lon]);
 
+  // Swing the camera to the observer whenever the location changes — the
+  // "Use my location" button, manual entry and the first-visit auto-locate
+  // all update the URL and land here, so the teal dot is never left on the
+  // far side of the globe. Also swings when the scene is fresh (created
+  // above): the globe opens centered on the visitor's spot, like the radar,
+  // so "you" is always in view instead of hidden behind the planet.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) {
+      return;
+    }
+    const last = lastAppliedLocationRef.current;
+    lastAppliedLocationRef.current = { lat, lon };
+    if (last === null || last.lat !== lat || last.lon !== lon) {
+      view.centerOnObserver();
+    }
+  }, [lat, lon]);
+
   // Drop a focus that no longer exists in the refreshed set.
   useEffect(() => {
     if (
@@ -1013,11 +1356,10 @@ export function SatelliteGlobe({
         location={{ lat, lon }}
         colors={COLORS}
       >
-        <div className="relative mx-auto w-full max-w-3xl">
+        <div className="relative mx-auto w-full max-w-[480px] sm:max-w-3xl">
           <div
             ref={mountRef}
-            style={{ aspectRatio: "4 / 3" }}
-            className="w-full rounded-2xl"
+            className="aspect-square w-full rounded-2xl sm:aspect-[4/3]"
             aria-label="3D globe showing live satellite positions and ground tracks"
           />
           {status !== "ready" && (
@@ -1043,13 +1385,16 @@ export function SatelliteGlobe({
         </div>
       </SatelliteGlobeHud>
 
-      <p className="mx-auto mt-5 max-w-md text-center text-[11px] leading-relaxed text-slate-500">
+      <p className="mx-auto mt-5 hidden max-w-md text-center text-[11px] leading-relaxed text-slate-500 sm:block">
         The globe spins at Earth&apos;s real rate — satellites orbit in fixed
         space, so you see the planet revolve beneath them. The pulsing dots are
         the satellites&apos; live positions around{" "}
-        <span className="text-slate-300">{formatCoordinates(lat, lon)}</span>
-        ; the teal dot is you, and the white ring marks the Moon&apos;s
-        sub-point and its path.{" "}
+        <span className="text-slate-300">{formatCoordinates(lat, lon)}</span>;
+        the teal dot is you, and the white ring marks the Moon&apos;s sub-point
+        — a faint light sweeps westward along its path. Each colored line is
+        one satellite&apos;s ground track — dim behind the dot (already flown),
+        bright ahead (where it&apos;s headed) — and a soft light sweeps forward
+        along the track, showing the satellite&apos;s direction of travel.{" "}
         <span className="text-slate-400">
           Click a satellite (or its name in the list) to rotate the view and
           lock onto its dot — drag the globe to release it.

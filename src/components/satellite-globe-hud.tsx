@@ -1,6 +1,12 @@
 "use client";
 
-import { ChevronDown, ChevronUp, Clock3, MapPin, Satellite as SatelliteIcon } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Clock3,
+  MapPin,
+  Satellite as SatelliteIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   findSatellitePasses,
@@ -63,6 +69,331 @@ function formatUpcoming(date: Date | null, now: Date): string | null {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
   return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
+}
+
+/* ── Panel bodies (shared by the floating desktop layout and the stacked
+      mobile layout — one source of truth for the HUD content) ──────── */
+
+function SatellitesPanel({
+  tles,
+  colors,
+  telemetry,
+  selectedId,
+  onSelect,
+  listOpen,
+  onToggleList,
+}: {
+  tles: TleEntry[];
+  colors: string[];
+  telemetry: GlobeTelemetry | null;
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  listOpen: boolean;
+  onToggleList: () => void;
+}) {
+  return (
+    <div className={`${PANEL} p-2.5`}>
+      <button
+        type="button"
+        onClick={onToggleList}
+        className="flex w-full items-center gap-1.5"
+        aria-expanded={listOpen}
+      >
+        <h4 className={`${HEADER} mb-0 text-slate-300`}>Satellites</h4>
+        <span className="ml-auto text-slate-500">
+          {listOpen ? (
+            <ChevronUp className="size-3" />
+          ) : (
+            <ChevronDown className="size-3" />
+          )}
+        </span>
+      </button>
+      {listOpen && (
+        <ul className="mt-2 max-h-64 space-y-1.5 overflow-y-auto pr-0.5">
+          {tles.map((tle, index) => {
+            const color = colors[index % colors.length];
+            const entry = telemetry?.sats[tle.noradId];
+            const active = tle.noradId === selectedId;
+            return (
+              <li key={tle.noradId}>
+                <button
+                  type="button"
+                  onClick={() => onSelect(active ? null : tle.noradId)}
+                  aria-pressed={active}
+                  className={`flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition ${
+                    active
+                      ? "bg-white/10 ring-1 ring-white/15"
+                      : "hover:bg-white/5"
+                  }`}
+                >
+                  <span
+                    className="size-2 shrink-0 rounded-full"
+                    style={{
+                      backgroundColor: color,
+                      boxShadow: `0 0 8px ${color}`,
+                    }}
+                  />
+                  <span className="min-w-0">
+                    <span className="block truncate text-[11px] leading-tight font-medium text-slate-100">
+                      {tle.name}
+                    </span>
+                    <span className="mono block text-[9px] leading-tight text-slate-500">
+                      {entry ? `${Math.round(entry.altitudeKm)} km` : "…"}
+                    </span>
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {!listOpen && (
+        <p className="mt-1 truncate text-[10px] text-slate-400">
+          {tles.length} tracked · tap to expand
+        </p>
+      )}
+    </div>
+  );
+}
+
+function TrackingPanel({
+  utcTime,
+  utcDate,
+  observerLat,
+  observerLon,
+  inViewCount,
+}: {
+  utcTime: string;
+  utcDate: string;
+  observerLat: number;
+  observerLon: number;
+  inViewCount: number;
+}) {
+  return (
+    <div className={`${PANEL} p-2.5`}>
+      <h4 className={`${HEADER} text-cyan-300`}>Tracking</h4>
+      <dl className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <Clock3 className="size-3 shrink-0 text-slate-500" />
+          <dd className="mono text-[11px] text-slate-100">
+            {utcTime}
+            <span className="ml-1.5 text-[9px] text-slate-500">{utcDate}</span>
+          </dd>
+        </div>
+        <div className="flex items-center gap-2">
+          <MapPin className="size-3 shrink-0 text-slate-500" />
+          <dd className="text-[11px] text-slate-100">
+            {formatCoordinates(observerLat, observerLon)}
+          </dd>
+        </div>
+        <div className="flex items-center gap-2">
+          <SatelliteIcon className="size-3 shrink-0 text-slate-500" />
+          <dd className="mono text-[11px] text-slate-100">
+            {inViewCount} {inViewCount === 1 ? "satellite" : "satellites"}
+            <span className="ml-1.5 text-[9px] text-slate-500">in view</span>
+          </dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+/** Legend — what the lights on the globe mean; "You" recenters the view. */
+function LegendPanel({ onCenterOnYou }: { onCenterOnYou?: () => void }) {
+  return (
+    <div className={`${PANEL} p-2.5`}>
+      <h4 className={`${HEADER} text-slate-300`}>On the globe</h4>
+      <ul className="space-y-1.5">
+        <li>
+          <button
+            type="button"
+            onClick={onCenterOnYou}
+            title="Rotate the view to your location"
+            className="flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left transition hover:bg-white/5"
+          >
+            <span className="size-2 shrink-0 rounded-full bg-[#67e8f9] shadow-[0_0_8px_#67e8f9]" />
+            <span className="text-[11px] text-slate-200">You</span>
+            <span className="ml-auto text-[9px] text-slate-500">
+              center view
+            </span>
+          </button>
+        </li>
+        <li className="flex items-center gap-2 px-1">
+          <span className="inline-block h-0.5 w-4 shrink-0 rounded-full bg-gradient-to-r from-cyan-400/30 to-cyan-300" />
+          <span className="text-[11px] text-slate-200">Ground track</span>
+          <span className="ml-auto text-[9px] text-slate-500">
+            dim past · bright ahead
+          </span>
+        </li>
+        <li className="flex items-center gap-2 px-1">
+          <span className="inline-block size-2.5 shrink-0 rounded-full border-2 border-[#f1f5f9]" />
+          <span className="text-[11px] text-slate-200">Moon</span>
+          <span className="ml-auto text-[9px] text-slate-500">
+            sub-point · its path
+          </span>
+        </li>
+      </ul>
+    </div>
+  );
+}
+
+function TelemetryPanel({
+  tles,
+  colors,
+  selectedTle,
+  selectedTelemetry,
+  nextPass,
+  now,
+}: {
+  tles: TleEntry[];
+  colors: string[];
+  selectedTle: TleEntry;
+  selectedTelemetry: GlobeTelemetry["sats"][string] | null;
+  nextPass: Date | null;
+  now: Date;
+}) {
+  return (
+    <div className={`${PANEL} w-full p-2.5`}>
+      <h4
+        className={`${HEADER} truncate`}
+        style={{
+          color:
+            colors[
+              tles.findIndex((tle) => tle.noradId === selectedTle.noradId) %
+                colors.length
+            ],
+        }}
+      >
+        {selectedTle.name}
+      </h4>
+      <dl className="space-y-1.5">
+        <div className="flex items-baseline justify-between gap-3">
+          <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
+            Altitude
+          </dt>
+          <dd className="mono text-[11px] text-slate-100">
+            {selectedTelemetry
+              ? `${Math.round(selectedTelemetry.altitudeKm)} km`
+              : "—"}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
+            Velocity
+          </dt>
+          <dd className="mono text-[11px] text-slate-100">
+            {selectedTelemetry
+              ? `${selectedTelemetry.speedKmS.toFixed(2)} km/s`
+              : "—"}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
+            Elevation
+          </dt>
+          <dd className="mono text-[11px] text-slate-100">
+            {selectedTelemetry
+              ? `${Math.round(selectedTelemetry.elevationDeg)}° ${
+                  selectedTelemetry.elevationDeg < 0 ? "below horizon" : ""
+                }`
+              : "—"}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
+            Sub-point
+          </dt>
+          <dd className="mono text-right text-[11px] text-slate-100">
+            {selectedTelemetry
+              ? formatCoordinates(selectedTelemetry.lat, selectedTelemetry.lon)
+              : "—"}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
+            Next pass
+          </dt>
+          <dd className="mono text-right text-[11px] text-slate-100">
+            {nextPass ? (
+              <>
+                {formatTime(nextPass, "UTC")}
+                <span className="block text-[9px] text-slate-500">
+                  UTC · {formatUpcoming(nextPass, now)}
+                </span>
+              </>
+            ) : (
+              "—"
+            )}
+          </dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+/** Compass — points at the tracked satellite. */
+function CompassPanel({
+  azimuth,
+  name,
+}: {
+  azimuth: number;
+  name: string | null;
+}) {
+  return (
+    <div className={`${PANEL} flex flex-col items-center gap-1 p-2`}>
+      <svg viewBox="0 0 80 80" className="size-14 drop-shadow-lg">
+        <circle
+          cx="40"
+          cy="40"
+          r="38"
+          fill="rgba(2, 6, 23, 0.7)"
+          stroke="rgba(255, 255, 255, 0.18)"
+          strokeWidth="1"
+        />
+        <circle
+          cx="40"
+          cy="40"
+          r="30"
+          fill="none"
+          stroke="rgba(255, 255, 255, 0.09)"
+          strokeDasharray="2 4"
+          strokeWidth="1"
+        />
+        <text
+          x="40"
+          y="13"
+          textAnchor="middle"
+          fontSize="10"
+          fontWeight="700"
+          fill="#cbd5e1"
+        >
+          N
+        </text>
+        <text x="70" y="44" textAnchor="middle" fontSize="9" fill="#64748b">
+          E
+        </text>
+        <text x="40" y="76" textAnchor="middle" fontSize="9" fill="#64748b">
+          S
+        </text>
+        <text x="10" y="44" textAnchor="middle" fontSize="9" fill="#64748b">
+          W
+        </text>
+        <g transform={`rotate(${azimuth} 40 40)`}>
+          <path
+            d="M40 14 L45.5 40 L40 66 L34.5 40 Z"
+            fill="#22d3ee"
+            opacity="0.9"
+          />
+        </g>
+        <circle cx="40" cy="40" r="3.5" fill="#0e7490" />
+        <circle cx="40" cy="40" r="1.5" fill="#a5f3fc" />
+      </svg>
+      <span className="mono max-w-full truncate text-[9px] text-slate-400">
+        {Math.round(azimuth)}° {formatCompass(azimuth)}
+        {name ? ` · ${name}` : ""}
+      </span>
+    </div>
+  );
 }
 
 export function SatelliteGlobeHud({
@@ -151,249 +482,80 @@ export function SatelliteGlobeHud({
   // The satellites list can get long — collapse it to a compact summary so
   // it never covers the globe on short screens.
   const [listOpen, setListOpen] = useState(false);
+  const toggleList = () => setListOpen((open) => !open);
+
+  const trackingPanel = (
+    <TrackingPanel
+      utcTime={utcTime}
+      utcDate={utcDate}
+      observerLat={observerLat}
+      observerLon={observerLon}
+      inViewCount={inViewCount}
+    />
+  );
+  const legendPanel = <LegendPanel onCenterOnYou={onCenterOnYou} />;
+  const compassPanel = (
+    <CompassPanel azimuth={compassAzimuth} name={compassName} />
+  );
+  const telemetryPanel = selectedTle ? (
+    <TelemetryPanel
+      tles={tles}
+      colors={colors}
+      selectedTle={selectedTle}
+      selectedTelemetry={selectedTelemetry}
+      nextPass={nextPass}
+      now={now}
+    />
+  ) : null;
 
   return (
     <div className="relative">
       {/* The globe itself — full width, centered, never covered. */}
       <div className="relative mx-auto w-full max-w-4xl">{children}</div>
 
-      {/* Left edge — satellites + tracking */}
-      <div className="pointer-events-none absolute top-0 left-0 z-10 flex max-h-full w-44 max-w-[38%] flex-col gap-2.5">
-        <div className={`${PANEL} p-2.5`}>
-          <button
-            type="button"
-            onClick={() => setListOpen((open) => !open)}
-            className="flex w-full items-center gap-1.5"
-            aria-expanded={listOpen}
-          >
-            <h4 className={`${HEADER} mb-0 text-slate-300`}>Satellites</h4>
-            <span className="ml-auto text-slate-500">
-              {listOpen ? (
-                <ChevronUp className="size-3" />
-              ) : (
-                <ChevronDown className="size-3" />
-              )}
-            </span>
-          </button>
-          {listOpen && (
-            <ul className="mt-2 max-h-64 space-y-1.5 overflow-y-auto pr-0.5">
-              {tles.map((tle, index) => {
-                const color = colors[index % colors.length];
-                const entry = telemetry?.sats[tle.noradId];
-                const active = tle.noradId === selectedId;
-                return (
-                  <li key={tle.noradId}>
-                    <button
-                      type="button"
-                      onClick={() => onSelect(active ? null : tle.noradId)}
-                      aria-pressed={active}
-                      className={`flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition ${
-                        active ? "bg-white/10 ring-1 ring-white/15" : "hover:bg-white/5"
-                      }`}
-                    >
-                      <span
-                        className="size-2 shrink-0 rounded-full"
-                        style={{ backgroundColor: color, boxShadow: `0 0 8px ${color}` }}
-                      />
-                      <span className="min-w-0">
-                        <span className="block truncate text-[11px] leading-tight font-medium text-slate-100">
-                          {tle.name}
-                        </span>
-                        <span className="mono block text-[9px] leading-tight text-slate-500">
-                          {entry ? `${Math.round(entry.altitudeKm)} km` : "…"}
-                        </span>
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-          {!listOpen && (
-            <p className="mt-1 truncate text-[10px] text-slate-400">
-              {tles.length} tracked · tap to expand
-            </p>
-          )}
+      {/* Mobile / tablet — the panels step out of the way and stack below the
+          globe in one tidy column (same rhythm as the radar card), so nothing
+          covers the canvas. Telemetry jumps to the top when a satellite is
+          selected; tracking and the legend share a row. */}
+      <div className="mt-3 w-full space-y-2.5 md:hidden">
+        {telemetryPanel && <div>{telemetryPanel}</div>}
+        <div>
+          <SatellitesPanel
+            tles={tles}
+            colors={colors}
+            telemetry={telemetry}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            listOpen={listOpen}
+            onToggleList={toggleList}
+          />
         </div>
-
-        <div className={`${PANEL} p-2.5`}>
-          <h4 className={`${HEADER} text-cyan-300`}>Tracking</h4>
-          <dl className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <Clock3 className="size-3 shrink-0 text-slate-500" />
-              <dd className="mono text-[11px] text-slate-100">
-                {utcTime}
-                <span className="ml-1.5 text-[9px] text-slate-500">{utcDate}</span>
-              </dd>
-            </div>
-            <div className="flex items-center gap-2">
-              <MapPin className="size-3 shrink-0 text-slate-500" />
-              <dd className="text-[11px] text-slate-100">
-                {formatCoordinates(observerLat, observerLon)}
-              </dd>
-            </div>
-            <div className="flex items-center gap-2">
-              <SatelliteIcon className="size-3 shrink-0 text-slate-500" />
-              <dd className="mono text-[11px] text-slate-100">
-                {inViewCount} {inViewCount === 1 ? "satellite" : "satellites"}
-                <span className="ml-1.5 text-[9px] text-slate-500">in view</span>
-              </dd>
-            </div>
-          </dl>
+        <div className="grid grid-cols-2 items-stretch gap-2.5">
+          {trackingPanel}
+          {legendPanel}
         </div>
-
-        {/* Legend — what the lights on the globe mean; "You" recenters the view */}
-        <div className={`${PANEL} p-2.5`}>
-          <h4 className={`${HEADER} text-slate-300`}>On the globe</h4>
-          <ul className="space-y-1.5">
-            <li>
-              <button
-                type="button"
-                onClick={onCenterOnYou}
-                title="Rotate the view to your location"
-                className="flex w-full items-center gap-2 rounded-md px-1 py-0.5 text-left transition hover:bg-white/5"
-              >
-                <span className="size-2 shrink-0 rounded-full bg-[#67e8f9] shadow-[0_0_8px_#67e8f9]" />
-                <span className="text-[11px] text-slate-200">You</span>
-                <span className="ml-auto text-[9px] text-slate-500">center view</span>
-              </button>
-            </li>
-            <li className="flex items-center gap-2 px-1">
-              <span className="inline-block size-2.5 shrink-0 rounded-full border-2 border-[#f1f5f9]" />
-              <span className="text-[11px] text-slate-200">Moon</span>
-              <span className="ml-auto text-[9px] text-slate-500">sub-point · its path</span>
-            </li>
-          </ul>
-        </div>
+        <div className="flex justify-center">{compassPanel}</div>
       </div>
 
-      {/* Right edge — detail + compass */}
-      <div className="pointer-events-none absolute top-0 right-0 z-10 flex max-h-full w-44 max-w-[38%] flex-col items-end gap-2.5">
-        {selectedTle && (
-          <div className={`${PANEL} w-full p-2.5`}>
-            <h4
-              className={`${HEADER} truncate`}
-              style={{
-                color:
-                  colors[
-                    tles.findIndex(
-                      (tle) => tle.noradId === selectedTle.noradId,
-                    ) % colors.length
-                  ],
-              }}
-            >
-              {selectedTle.name}
-            </h4>
-            <dl className="space-y-1.5">
-              <div className="flex items-baseline justify-between gap-3">
-                <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
-                  Altitude
-                </dt>
-                <dd className="mono text-[11px] text-slate-100">
-                  {selectedTelemetry
-                    ? `${Math.round(selectedTelemetry.altitudeKm)} km`
-                    : "—"}
-                </dd>
-              </div>
-              <div className="flex items-baseline justify-between gap-3">
-                <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
-                  Velocity
-                </dt>
-                <dd className="mono text-[11px] text-slate-100">
-                  {selectedTelemetry
-                    ? `${selectedTelemetry.speedKmS.toFixed(2)} km/s`
-                    : "—"}
-                </dd>
-              </div>
-              <div className="flex items-baseline justify-between gap-3">
-                <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
-                  Elevation
-                </dt>
-                <dd className="mono text-[11px] text-slate-100">
-                  {selectedTelemetry
-                    ? `${Math.round(selectedTelemetry.elevationDeg)}° ${
-                        selectedTelemetry.elevationDeg < 0 ? "below horizon" : ""
-                      }`
-                    : "—"}
-                </dd>
-              </div>
-              <div className="flex items-baseline justify-between gap-3">
-                <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
-                  Sub-point
-                </dt>
-                <dd className="mono text-right text-[11px] text-slate-100">
-                  {selectedTelemetry
-                    ? formatCoordinates(
-                        selectedTelemetry.lat,
-                        selectedTelemetry.lon,
-                      )
-                    : "—"}
-                </dd>
-              </div>
-              <div className="flex items-baseline justify-between gap-3">
-                <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
-                  Next pass
-                </dt>
-                <dd className="mono text-right text-[11px] text-slate-100">
-                  {nextPass ? (
-                    <>
-                      {formatTime(nextPass, "UTC")}
-                      <span className="block text-[9px] text-slate-500">
-                        UTC · {formatUpcoming(nextPass, now)}
-                      </span>
-                    </>
-                  ) : (
-                    "—"
-                  )}
-                </dd>
-              </div>
-            </dl>
-          </div>
-        )}
+      {/* Left edge — satellites + tracking + legend (desktop, unchanged) */}
+      <div className="pointer-events-none absolute top-0 left-0 z-10 hidden max-h-full w-44 max-w-[38%] flex-col gap-2.5 md:flex">
+        <SatellitesPanel
+          tles={tles}
+          colors={colors}
+          telemetry={telemetry}
+          selectedId={selectedId}
+          onSelect={onSelect}
+          listOpen={listOpen}
+          onToggleList={toggleList}
+        />
+        {trackingPanel}
+        {legendPanel}
+      </div>
 
-        {/* Compass — points at the tracked satellite */}
-        <div className={`${PANEL} flex flex-col items-center gap-1 p-2`}>
-          <svg viewBox="0 0 80 80" className="size-14 drop-shadow-lg">
-            <circle
-              cx="40"
-              cy="40"
-              r="38"
-              fill="rgba(2, 6, 23, 0.7)"
-              stroke="rgba(255, 255, 255, 0.18)"
-              strokeWidth="1"
-            />
-            <circle
-              cx="40"
-              cy="40"
-              r="30"
-              fill="none"
-              stroke="rgba(255, 255, 255, 0.09)"
-              strokeDasharray="2 4"
-              strokeWidth="1"
-            />
-            <text x="40" y="13" textAnchor="middle" fontSize="10" fontWeight="700" fill="#cbd5e1">
-              N
-            </text>
-            <text x="70" y="44" textAnchor="middle" fontSize="9" fill="#64748b">
-              E
-            </text>
-            <text x="40" y="76" textAnchor="middle" fontSize="9" fill="#64748b">
-              S
-            </text>
-            <text x="10" y="44" textAnchor="middle" fontSize="9" fill="#64748b">
-              W
-            </text>
-            <g transform={`rotate(${compassAzimuth} 40 40)`}>
-              <path d="M40 14 L45.5 40 L40 66 L34.5 40 Z" fill="#22d3ee" opacity="0.9" />
-            </g>
-            <circle cx="40" cy="40" r="3.5" fill="#0e7490" />
-            <circle cx="40" cy="40" r="1.5" fill="#a5f3fc" />
-          </svg>
-          <span className="mono max-w-full truncate text-[9px] text-slate-400">
-            {Math.round(compassAzimuth)}° {formatCompass(compassAzimuth)}
-            {compassName ? ` · ${compassName}` : ""}
-          </span>
-        </div>
+      {/* Right edge — detail + compass (desktop, unchanged) */}
+      <div className="pointer-events-none absolute top-0 right-0 z-10 hidden max-h-full w-44 max-w-[38%] flex-col items-end gap-2.5 md:flex">
+        {telemetryPanel}
+        {compassPanel}
       </div>
     </div>
   );
