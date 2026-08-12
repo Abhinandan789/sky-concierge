@@ -111,7 +111,7 @@ export async function POST(request: NextRequest) {
   const needsVerification = Boolean(process.env.RESEND_API_KEY);
 
   try {
-    const subscription = upsertSubscription(getDb(), {
+    const subscription = await upsertSubscription(await getDb(), {
       email,
       lat,
       lon,

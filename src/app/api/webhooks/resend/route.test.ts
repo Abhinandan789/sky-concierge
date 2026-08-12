@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.stubEnv("SKY_DB_PATH", ":memory:");
+vi.stubEnv("DATABASE_URL", ":memory:");
 
 import { NextRequest } from "next/server";
 import { getDb, listEnabledSubscriptions, upsertSubscription } from "@/lib/db";
@@ -31,25 +31,34 @@ function sign(body: string, secret: string): string {
   return `t=${t},s=${sig}`;
 }
 
-function resetDb() {
-  (globalThis as { skyDb?: unknown }).skyDb = undefined;
+// Wipe all tables but keep the one shared PGlite instance — recreating it per
+// test would pay PGlite's ~10s WASM compile every time.
+async function resetDb() {
+  const db = await getDb();
+  await db.exec(
+    `DELETE FROM email_events;
+     DELETE FROM push_logs;
+     DELETE FROM alert_logs;
+     DELETE FROM push_subscriptions;
+     DELETE FROM alert_subscriptions;`,
+  );
 }
 
 describe("POST /api/webhooks/resend", () => {
-  beforeEach(() => {
-    resetDb();
+  beforeEach(async () => {
+    await resetDb();
     vi.unstubAllEnvs();
-    vi.stubEnv("SKY_DB_PATH", ":memory:");
+    vi.stubEnv("DATABASE_URL", ":memory:");
   });
 
   it("marks a permanent bounce as failed and disables the subscription", async () => {
-    upsertSubscription(getDb(), {
+    await upsertSubscription(await getDb(), {
       email: "dead@example.com",
       lat: 40.7,
       lon: -74,
       events: "iss",
     });
-    expect(listEnabledSubscriptions(getDb())).toHaveLength(1);
+    expect(await listEnabledSubscriptions(await getDb())).toHaveLength(1);
 
     const response = await webhookPost(
       webhookRequest({
@@ -66,24 +75,21 @@ describe("POST /api/webhooks/resend", () => {
     expect(response.status).toBe(200);
     expect((await response.json()).data.received).toBe("email.bounced");
 
-    const row = getDb()
-      .prepare(
-        `SELECT enabled, email_status AS emailStatus, bounced_at AS bouncedAt
-         FROM alert_subscriptions WHERE email = 'dead@example.com'`,
-      )
-      .get() as {
-      enabled: number;
-      emailStatus: string;
-      bouncedAt: string | null;
-    };
+    const row = (await (
+      await getDb()
+    ).get<{ enabled: number; emailStatus: string; bouncedAt: string | null }>(
+      `SELECT enabled, email_status AS "emailStatus", bounced_at AS "bouncedAt"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["dead@example.com"],
+    )) as { enabled: number; emailStatus: string; bouncedAt: string | null };
     expect(row.enabled).toBe(0);
     expect(row.emailStatus).toBe("bounced");
     expect(row.bouncedAt).toBeTruthy();
-    expect(listEnabledSubscriptions(getDb())).toHaveLength(0);
+    expect(await listEnabledSubscriptions(await getDb())).toHaveLength(0);
   });
 
   it("treats `to` as a string too (Resend sends both shapes)", async () => {
-    upsertSubscription(getDb(), {
+    await upsertSubscription(await getDb(), {
       email: "solo@example.com",
       lat: 1,
       lon: 2,
@@ -96,17 +102,18 @@ describe("POST /api/webhooks/resend", () => {
       }),
     );
     expect(response.status).toBe(200);
-    const row = getDb()
-      .prepare(
-        `SELECT email_status AS emailStatus
-         FROM alert_subscriptions WHERE email = 'solo@example.com'`,
-      )
-      .get() as { emailStatus: string };
+    const row = (await (
+      await getDb()
+    ).get<{ emailStatus: string }>(
+      `SELECT email_status AS "emailStatus"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["solo@example.com"],
+    )) as { emailStatus: string };
     expect(row.emailStatus).toBe("delivered");
   });
 
   it("acknowledges non-email events without touching subscriptions", async () => {
-    upsertSubscription(getDb(), {
+    await upsertSubscription(await getDb(), {
       email: "safe@example.com",
       lat: 1,
       lon: 2,
@@ -116,12 +123,13 @@ describe("POST /api/webhooks/resend", () => {
       webhookRequest({ type: "domain.created", data: {} }),
     );
     expect(response.status).toBe(200);
-    const row = getDb()
-      .prepare(
-        `SELECT email_status AS emailStatus
-         FROM alert_subscriptions WHERE email = 'safe@example.com'`,
-      )
-      .get() as { emailStatus: string };
+    const row = (await (
+      await getDb()
+    ).get<{ emailStatus: string }>(
+      `SELECT email_status AS "emailStatus"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["safe@example.com"],
+    )) as { emailStatus: string };
     expect(row.emailStatus).toBe("ok");
   });
 
@@ -148,7 +156,7 @@ describe("POST /api/webhooks/resend", () => {
 
   it("enforces the signing secret when configured", async () => {
     vi.stubEnv("RESEND_WEBHOOK_SECRET", "webhook-secret");
-    upsertSubscription(getDb(), {
+    await upsertSubscription(await getDb(), {
       email: "signed@example.com",
       lat: 1,
       lon: 2,
@@ -167,11 +175,12 @@ describe("POST /api/webhooks/resend", () => {
     // No signature → 401, subscription untouched.
     const unsigned = await webhookPost(webhookRequest(body));
     expect(unsigned.status).toBe(401);
-    const row = getDb()
-      .prepare(
-        `SELECT enabled FROM alert_subscriptions WHERE email = 'signed@example.com'`,
-      )
-      .get() as { enabled: number };
+    const row = (await (
+      await getDb()
+    ).get<{ enabled: number }>(
+      `SELECT enabled FROM alert_subscriptions WHERE email = $1`,
+      ["signed@example.com"],
+    )) as { enabled: number };
     expect(row.enabled).toBe(1);
 
     // Wrong signature → 401.
@@ -183,11 +192,12 @@ describe("POST /api/webhooks/resend", () => {
       webhookRequest(body, sign(JSON.stringify(body), "webhook-secret")),
     );
     expect(signed.status).toBe(200);
-    const after = getDb()
-      .prepare(
-        `SELECT enabled FROM alert_subscriptions WHERE email = 'signed@example.com'`,
-      )
-      .get() as { enabled: number };
+    const after = (await (
+      await getDb()
+    ).get<{ enabled: number }>(
+      `SELECT enabled FROM alert_subscriptions WHERE email = $1`,
+      ["signed@example.com"],
+    )) as { enabled: number };
     expect(after.enabled).toBe(0);
   });
 });

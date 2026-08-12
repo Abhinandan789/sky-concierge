@@ -72,24 +72,26 @@ const DOT_HALO_PULSE_PERIOD_MS = 280;
 const TRACK_PAST_OPACITY = 0.18;
 const TRACK_FUTURE_OPACITY = 0.6;
 
-/** Direction-of-travel comet — a bright leading edge with a fading trail
- * that pushes forward along the future track, then loops back to the dot.
- * One-directional: the light only ever moves forward along the path. */
-const COMET_TRAIL_COUNT = 8;
-/** Head (leading) sprite size; the trail shrinks behind it. */
-const COMET_HEAD_SCALE = 0.09;
-const COMET_TRAIL_SCALE = 0.04;
-/** Head-to-tail length of the comet, in degrees of arc along the track. */
+/** Direction-of-travel pulse — a crisp stretch of the bright (future) track
+ * sweeping forward ahead of the dot, drawn as hard-edged sub-segments riding
+ * the same polyline (no glow sprites). One-directional: the brightening only
+ * ever moves forward along the path. */
+const COMET_SEGMENTS = 4;
+/** Head-to-tail length of the pulse, in degrees of arc along the track. */
 const COMET_LENGTH_DEG = 14;
 /** How far ahead of the dot the head sweeps before looping back. */
 const COMET_SWEEP_DEG = 24;
-/** Forward speed of the head along the track, degrees/second. Kept calm —
- * at 0.8°/s the full sweep takes ~30 s, reading as a slow trailing light. */
+/** Forward speed of the pulse along the track, degrees/second. Kept calm —
+ * at 0.8°/s the full sweep takes ~30 s, reading as a slow traveling light. */
 const COMET_SPEED_DEG_S = 0.8;
-/** Head opacity; each ember behind it fades toward zero. */
-const COMET_HEAD_OPACITY = 0.5;
-/** Arc (degrees) over which the comet fades in after respawning. */
+/** Leading-edge segment opacity; each segment behind it steps down. */
+const COMET_HEAD_OPACITY = 0.9;
+const COMET_TAIL_OPACITY = 0.15;
+/** Arc (degrees) over which the pulse fades in after respawning. */
 const COMET_SPAWN_FADE_DEG = 2.5;
+/** How far above the track the pulse is drawn (km), so it never z-fights
+ * the line it's riding. */
+const PULSE_LIFT_KM = 2;
 
 /** Visible-pass highlight — a lime arc over the future track where the
  * satellite will actually be watchable from the observer's location
@@ -118,16 +120,15 @@ function formatOffsetLabel(ms: number): string {
   return `${sign}${minutes}m`;
 }
 
-/** Moon path comet — the same one-way trailing treatment, sized to the
+/** Moon path pulse — the same one-way leading-edge treatment, sized to the
  * Moon's slow ~15°/hour westward drift (its future window is only ~15° of
  * arc, so the sweep stays short and calm). */
-const MOON_COMET_TRAIL_COUNT = 6;
-const MOON_COMET_HEAD_SCALE = 0.085;
-const MOON_COMET_TRAIL_SCALE = 0.035;
+const MOON_COMET_SEGMENTS = 4;
 const MOON_COMET_LENGTH_DEG = 3;
 const MOON_COMET_SWEEP_DEG = 4.5;
 const MOON_COMET_SPEED_DEG_S = 0.35;
-const MOON_COMET_HEAD_OPACITY = 0.45;
+const MOON_COMET_HEAD_OPACITY = 0.85;
+const MOON_COMET_TAIL_OPACITY = 0.15;
 const MOON_COMET_SPAWN_FADE_DEG = 1.5;
 
 /**
@@ -356,6 +357,15 @@ function makeGlowSprite(color: string): THREE.Sprite {
   return sprite;
 }
 
+/** A 2-vertex line segment of the direction-of-travel pulse, drawn just above
+ * the ground track with a hard edge (no glow). */
+interface CometSegment {
+  line: THREE.Line;
+  geometry: THREE.BufferGeometry;
+  /** Resting opacity for this sub-segment (head → tail). */
+  opacity: number;
+}
+
 /** Everything the animation loop needs for one tracked satellite. */
 interface GlobeSatellite {
   tle: TleEntry;
@@ -370,8 +380,9 @@ interface GlobeSatellite {
   /** Live dot: hot white core + pulsing colored halo. */
   core: THREE.Sprite;
   halo: THREE.Sprite;
-  /** One-way direction-of-travel comet — bright head, fading tail. */
-  cometTrail: THREE.Sprite[];
+  /** One-way direction-of-travel pulse — crisp sub-segments along the future
+   * track, bright at the leading edge and stepping down behind it. */
+  cometSegments: CometSegment[];
   /** Distance the comet head has traveled ahead of the dot (radians). */
   cometDist: number;
   /** Per-track-vertex flag: watchable from the observer (elevation above
@@ -444,14 +455,36 @@ function buildSatellite(
   core.userData = { noradId: tle.noradId };
   const halo = makeGlowSprite(color);
   halo.scale.set(DOT_HALO_BASE_SCALE, DOT_HALO_BASE_SCALE, 1);
-  // Direction-of-travel comet — a bright leading edge with a fading trail
-  // riding the bright (future) track ahead of the dot. Positioned, scaled
-  // and faded by the animate loop; it only ever moves forward.
-  const cometTrail = Array.from({ length: COMET_TRAIL_COUNT }, () => {
-    const sprite = makeGlowSprite(color);
-    sprite.scale.set(COMET_HEAD_SCALE, COMET_HEAD_SCALE, 1);
-    return sprite;
-  });
+  // Direction-of-travel pulse — a crisp stretch of the bright (future) track
+  // sweeping forward ahead of the dot. Hard-edged sub-segments riding the
+  // same polyline (no glow sprites); vertices + opacities set by the animate
+  // loop. It only ever moves forward.
+  const makeCometSegment = (opacity: number): CometSegment => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(new Float32Array(6), 3),
+    );
+    const line = new THREE.Line(
+      geometry,
+      new THREE.LineBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      }),
+    );
+    // A 2-vertex line's bounding sphere is a point — never let it be culled.
+    line.frustumCulled = false;
+    return { line, geometry, opacity };
+  };
+  const cometSegments = Array.from({ length: COMET_SEGMENTS }, (_, i) =>
+    makeCometSegment(
+      COMET_HEAD_OPACITY +
+        (COMET_TAIL_OPACITY - COMET_HEAD_OPACITY) *
+          (i / (COMET_SEGMENTS - 1)),
+    ),
+  );
 
   return {
     tle,
@@ -462,7 +495,7 @@ function buildSatellite(
     futureLine,
     core,
     halo,
-    cometTrail,
+    cometSegments,
     cometDist: 0,
     watchable,
     passGeometry,
@@ -590,11 +623,11 @@ function createGlobeView(
   let moonFutureLine: THREE.Line | null = null;
   let moonTrack: MoonTrack | null = null;
   let lastMoonAdvanceAt = 0;
-  // Moon path comet — one-way leading-edge sweep along its bright (future)
+  // Moon path pulse — one-way leading-edge sweep along its bright (future)
   // path. `moonFutureStart`/`moonFutureEnd` are the drawn future vertex
-  // range (updated on every path advance), so the comet always samples the
+  // range (updated on every path advance), so the pulse always samples the
   // same polyline the line is drawn from.
-  let moonCometTrail: THREE.Sprite[] = [];
+  let moonCometSegments: CometSegment[] = [];
   let moonCometDist = 0;
   let moonFutureStart = 0;
   let moonFutureEnd = 0;
@@ -615,7 +648,7 @@ function createGlobeView(
         sat.passLine,
         sat.core,
         sat.halo,
-        ...sat.cometTrail,
+        ...sat.cometSegments.map((segment) => segment.line),
       );
       sat.pastGeometry.dispose();
       sat.futureGeometry.dispose();
@@ -627,9 +660,9 @@ function createGlobeView(
       (sat.core.material as THREE.Material).dispose();
       (sat.halo.material as THREE.SpriteMaterial).map?.dispose();
       (sat.halo.material as THREE.Material).dispose();
-      for (const sprite of sat.cometTrail) {
-        (sprite.material as THREE.SpriteMaterial).map?.dispose();
-        (sprite.material as THREE.Material).dispose();
+      for (const segment of sat.cometSegments) {
+        segment.geometry.dispose();
+        (segment.line.material as THREE.Material).dispose();
       }
     }
     sats.clear();
@@ -642,7 +675,7 @@ function createGlobeView(
         sat.passLine,
         sat.core,
         sat.halo,
-        ...sat.cometTrail,
+        ...sat.cometSegments.map((segment) => segment.line),
       );
       sats.set(tle.noradId, sat);
     });
@@ -675,15 +708,15 @@ function createGlobeView(
         (object.material as THREE.SpriteMaterial).map?.dispose();
       }
     }
-    for (const sprite of moonCometTrail) {
-      earthGroup.remove(sprite);
-      (sprite.material as THREE.SpriteMaterial).map?.dispose();
-      (sprite.material as THREE.Material).dispose();
+    for (const segment of moonCometSegments) {
+      earthGroup.remove(segment.line);
+      segment.geometry.dispose();
+      (segment.line.material as THREE.Material).dispose();
     }
     moonMarker = null;
     moonPastLine = null;
     moonFutureLine = null;
-    moonCometTrail = [];
+    moonCometSegments = [];
     moonCometDist = 0;
 
     // Marker at the current sub-point, just above the surface.
@@ -740,17 +773,39 @@ function createGlobeView(
     moonFutureLine.geometry.setDrawRange(split, end - split);
     earthGroup.add(moonPastLine, moonFutureLine);
 
-    // Direction-of-travel comet for the Moon: a bright leading edge with a
-    // fading trail sweeping forward along its bright (future) path — the
-    // same one-way treatment the satellites get, sized to its slow drift.
+    // Direction-of-travel pulse for the Moon: crisp sub-segments sweeping
+    // forward along its bright (future) path — the same one-way treatment
+    // the satellites get, sized to its slow drift.
     moonFutureStart = split;
     moonFutureEnd = end;
-    moonCometTrail = Array.from({ length: MOON_COMET_TRAIL_COUNT }, () => {
-      const sprite = makeGlowSprite(MOON_COLOR);
-      sprite.scale.set(MOON_COMET_HEAD_SCALE, MOON_COMET_HEAD_SCALE, 1);
-      earthGroup.add(sprite);
-      return sprite;
-    });
+    const makeMoonSegment = (opacity: number): CometSegment => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(new Float32Array(6), 3),
+      );
+      const line = new THREE.Line(
+        geometry,
+        new THREE.LineBasicMaterial({
+          color: MOON_COLOR,
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+        }),
+      );
+      // A 2-vertex line's bounding sphere is a point — never let it be
+      // culled.
+      line.frustumCulled = false;
+      earthGroup.add(line);
+      return { line, geometry, opacity };
+    };
+    moonCometSegments = Array.from({ length: MOON_COMET_SEGMENTS }, (_, i) =>
+      makeMoonSegment(
+        MOON_COMET_HEAD_OPACITY +
+          (MOON_COMET_TAIL_OPACITY - MOON_COMET_HEAD_OPACITY) *
+            (i / (MOON_COMET_SEGMENTS - 1)),
+      ),
+    );
   };
 
   const setSelected = (id: string | null) => {
@@ -832,21 +887,21 @@ function createGlobeView(
   });
 
   const clock = new THREE.Clock();
-  // Scratch buffers for the direction-of-travel comet (avoid per-frame
+  // Scratch buffers for the direction-of-travel pulse (avoid per-frame
   // allocations in the animate loop).
-  const cometTrailPositions = Array.from(
-    { length: COMET_TRAIL_COUNT },
+  const cometPulsePositions = Array.from(
+    { length: COMET_SEGMENTS + 1 },
     () => new THREE.Vector3(),
   );
-  const cometTargets = new Array<number>(COMET_TRAIL_COUNT);
+  const cometPulseTargets = new Array<number>(COMET_SEGMENTS + 1);
   const cometScratchPrev = new THREE.Vector3();
   const cometScratchCur = new THREE.Vector3();
-  // Same scratch buffers for the Moon's path comet.
-  const moonCometPositions = Array.from(
-    { length: MOON_COMET_TRAIL_COUNT },
+  // Same scratch buffers for the Moon's path pulse.
+  const moonPulsePositions = Array.from(
+    { length: MOON_COMET_SEGMENTS + 1 },
     () => new THREE.Vector3(),
   );
-  const moonCometTargets = new Array<number>(MOON_COMET_TRAIL_COUNT);
+  const moonPulseTargets = new Array<number>(MOON_COMET_SEGMENTS + 1);
   let frame = 0;
   let lastTelemetryAt = 0;
   // Simulated-clock offset (ms), 0 = live. Everything in the loop that reads
@@ -925,10 +980,10 @@ function createGlobeView(
       sat.pastGeometry.setDrawRange(0, k);
       sat.futureGeometry.setDrawRange(k, sat.times.length - k);
 
-      // Direction-of-travel comet: a bright leading edge with a fading trail
-      // that pushes forward along the bright (future) line ahead of the dot,
-      // then loops back to the dot for another sweep. One-directional — the
-      // light never moves backwards, so the path's direction reads at a
+      // Direction-of-travel pulse: a crisp stretch of the bright (future)
+      // line that brightens ahead of the dot and sweeps forward along the
+      // path, then loops back for another pass. Hard-edged sub-segments only
+      // (no glow) — one-directional, so the path's direction reads at a
       // glance. It samples the same polyline the line is drawn from, so it
       // always rides the actual track.
       const n = sat.times.length;
@@ -940,49 +995,60 @@ function createGlobeView(
           sat.cometDist = 0; // reached the sweep limit — start over at the dot
         }
         // Arc distances from the live point, tail → head (ascending), so the
-        // sampler can place every ember in a single walk over the polyline.
-        const step =
-          (COMET_LENGTH_DEG * radPerDeg) / (COMET_TRAIL_COUNT - 1);
-        for (let i = 0; i < COMET_TRAIL_COUNT; i += 1) {
-          cometTargets[i] = Math.max(
+        // sampler can place every pulse vertex in a single walk.
+        const step = (COMET_LENGTH_DEG * radPerDeg) / COMET_SEGMENTS;
+        for (let i = 0; i <= COMET_SEGMENTS; i += 1) {
+          cometPulseTargets[i] = Math.max(
             0,
-            sat.cometDist - (COMET_TRAIL_COUNT - 1 - i) * step,
+            sat.cometDist - (COMET_SEGMENTS - i) * step,
           );
         }
         sampleTrackArc(
           sat.futureGeometry.attributes.position.array as Float32Array,
           k,
           n,
-          cometTargets,
-          cometTrailPositions,
+          cometPulseTargets,
+          cometPulsePositions,
           cometScratchPrev,
           cometScratchCur,
         );
+        // Lift the pulse a couple km off the track so it never z-fights the
+        // line it's riding (imperceptible at globe scale). The scene is a
+        // unit sphere, so the km lift must be scaled by EARTH_RADIUS_KM.
+        const pulseRadius = cometPulsePositions[0].length();
+        for (let i = 0; i <= COMET_SEGMENTS; i += 1) {
+          cometPulsePositions[i].multiplyScalar(
+            (pulseRadius + PULSE_LIFT_KM / EARTH_RADIUS_KM) / pulseRadius,
+          );
+        }
         // Fade in right after looping so the respawn isn't a hard pop.
         const spawnFade = Math.min(
           1,
           sat.cometDist / (COMET_SPAWN_FADE_DEG * radPerDeg),
         );
-        for (let i = 0; i < COMET_TRAIL_COUNT; i += 1) {
-          const sprite = sat.cometTrail[i];
-          // cometTrailPositions holds tail → head, so the leading edge
-          // (sprite 0) maps to the last sampled point.
-          sprite.visible = true;
-          sprite.position.copy(
-            cometTrailPositions[COMET_TRAIL_COUNT - 1 - i],
-          );
-          const trail = i / (COMET_TRAIL_COUNT - 1);
-          const scale =
-            COMET_HEAD_SCALE +
-            (COMET_TRAIL_SCALE - COMET_HEAD_SCALE) * trail;
-          sprite.scale.set(scale, scale, 1);
-          (sprite.material as THREE.SpriteMaterial).opacity =
-            COMET_HEAD_OPACITY * spawnFade * Math.pow(1 - trail, 1.5);
+        // Sub-segments step down from the bright leading edge to the tail;
+        // positions hold tail → head, so segment j connects the two sampled
+        // points just behind the head.
+        for (let j = 0; j < COMET_SEGMENTS; j += 1) {
+          const segment = sat.cometSegments[j];
+          const a = cometPulsePositions[COMET_SEGMENTS - 1 - j];
+          const b = cometPulsePositions[COMET_SEGMENTS - j];
+          const arr = segment.geometry.attributes.position
+            .array as Float32Array;
+          arr[0] = a.x;
+          arr[1] = a.y;
+          arr[2] = a.z;
+          arr[3] = b.x;
+          arr[4] = b.y;
+          arr[5] = b.z;
+          segment.geometry.attributes.position.needsUpdate = true;
+          (segment.line.material as THREE.LineBasicMaterial).opacity =
+            segment.opacity * spawnFade;
         }
       } else {
         // No future vertices left in the track window — nothing to sweep.
-        for (const sprite of sat.cometTrail) {
-          sprite.visible = false;
+        for (const segment of sat.cometSegments) {
+          (segment.line.material as THREE.LineBasicMaterial).opacity = 0;
         }
       }
 
@@ -1075,9 +1141,10 @@ function createGlobeView(
       moonFutureEnd = end;
     }
 
-    // Moon path comet — same one-way leading-edge sweep as the satellites:
-    // the bright head pushes forward along the Moon's (westward) path and
-    // loops back to the ring, so the drift direction reads at a glance.
+    // Moon path pulse — same one-way leading-edge sweep as the satellites:
+    // the crisp brightened stretch pushes forward along the Moon's (westward)
+    // path and loops back to the ring, so the drift direction reads at a
+    // glance.
     if (moonFutureLine && moonFutureStart < moonFutureEnd - 1) {
       const radPerDeg = Math.PI / 180;
       moonCometDist += MOON_COMET_SPEED_DEG_S * radPerDeg * delta;
@@ -1086,11 +1153,11 @@ function createGlobeView(
         moonCometDist = 0;
       }
       const step =
-        (MOON_COMET_LENGTH_DEG * radPerDeg) / (MOON_COMET_TRAIL_COUNT - 1);
-      for (let i = 0; i < MOON_COMET_TRAIL_COUNT; i += 1) {
-        moonCometTargets[i] = Math.max(
+        (MOON_COMET_LENGTH_DEG * radPerDeg) / MOON_COMET_SEGMENTS;
+      for (let i = 0; i <= MOON_COMET_SEGMENTS; i += 1) {
+        moonPulseTargets[i] = Math.max(
           0,
-          moonCometDist - (MOON_COMET_TRAIL_COUNT - 1 - i) * step,
+          moonCometDist - (MOON_COMET_SEGMENTS - i) * step,
         );
       }
       const moonPts = moonFutureLine.geometry.attributes.position
@@ -1099,32 +1166,43 @@ function createGlobeView(
         moonPts,
         moonFutureStart,
         moonFutureEnd,
-        moonCometTargets,
-        moonCometPositions,
+        moonPulseTargets,
+        moonPulsePositions,
         cometScratchPrev,
         cometScratchCur,
       );
+      // Lift the pulse a couple km off the track so it never z-fights the
+      // line it's riding (imperceptible at globe scale). The scene is a
+      // unit sphere, so the km lift must be scaled by EARTH_RADIUS_KM.
+      const pulseRadius = moonPulsePositions[0].length();
+      for (let i = 0; i <= MOON_COMET_SEGMENTS; i += 1) {
+        moonPulsePositions[i].multiplyScalar(
+          (pulseRadius + PULSE_LIFT_KM / EARTH_RADIUS_KM) / pulseRadius,
+        );
+      }
       const spawnFade = Math.min(
         1,
         moonCometDist / (MOON_COMET_SPAWN_FADE_DEG * radPerDeg),
       );
-      for (let i = 0; i < MOON_COMET_TRAIL_COUNT; i += 1) {
-        const sprite = moonCometTrail[i];
-        sprite.visible = true;
-        sprite.position.copy(
-          moonCometPositions[MOON_COMET_TRAIL_COUNT - 1 - i],
-        );
-        const trail = i / (MOON_COMET_TRAIL_COUNT - 1);
-        const scale =
-          MOON_COMET_HEAD_SCALE +
-          (MOON_COMET_TRAIL_SCALE - MOON_COMET_HEAD_SCALE) * trail;
-        sprite.scale.set(scale, scale, 1);
-        (sprite.material as THREE.SpriteMaterial).opacity =
-          MOON_COMET_HEAD_OPACITY * spawnFade * Math.pow(1 - trail, 1.5);
+      for (let j = 0; j < MOON_COMET_SEGMENTS; j += 1) {
+        const segment = moonCometSegments[j];
+        const a = moonPulsePositions[MOON_COMET_SEGMENTS - 1 - j];
+        const b = moonPulsePositions[MOON_COMET_SEGMENTS - j];
+        const arr = segment.geometry.attributes.position
+          .array as Float32Array;
+        arr[0] = a.x;
+        arr[1] = a.y;
+        arr[2] = a.z;
+        arr[3] = b.x;
+        arr[4] = b.y;
+        arr[5] = b.z;
+        segment.geometry.attributes.position.needsUpdate = true;
+        (segment.line.material as THREE.LineBasicMaterial).opacity =
+          segment.opacity * spawnFade;
       }
-    } else if (moonCometTrail.length > 0) {
-      for (const sprite of moonCometTrail) {
-        sprite.visible = false;
+    } else if (moonCometSegments.length > 0) {
+      for (const segment of moonCometSegments) {
+        (segment.line.material as THREE.LineBasicMaterial).opacity = 0;
       }
     }
 
@@ -1577,8 +1655,8 @@ export function SatelliteGlobe({
         <span className="text-slate-300">{formatCoordinates(lat, lon)}</span>;
         the teal dot is you, and the white ring marks the Moon&apos;s sub-point.
         Each colored line is one satellite&apos;s ground track — dim behind the
-        dot (already flown), bright ahead (where it&apos;s headed) — with a soft
-        light sweeping forward to show the direction of travel, and the Moon&apos;s
+        dot (already flown), bright ahead (where it&apos;s headed) — with a crisp
+        pulse sweeping forward to show the direction of travel, and the Moon&apos;s
         path sweeping westward.{" "}
         <span className="text-lime-300">
           A lime arc marks where the satellite will actually be visible from

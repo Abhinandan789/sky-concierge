@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
     return jsonError("An unsubscribe token is required.", 400, "MISSING_TOKEN");
   }
 
-  const found = disableSubscription(getDb(), token);
+  const found = await disableSubscription(await getDb(), token);
   // Idempotent: unsubscribing twice (or after the token expired) is still OK.
   return jsonOk({ unsubscribed: true, found });
 }
