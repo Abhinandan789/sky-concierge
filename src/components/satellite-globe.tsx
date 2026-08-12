@@ -87,8 +87,6 @@ const COMET_SPEED_DEG_S = 0.8;
 /** Leading-edge segment opacity; each segment behind it steps down. */
 const COMET_HEAD_OPACITY = 1;
 const COMET_TAIL_OPACITY = 0.3;
-/** Size of the crisp solid dot at the pulse's leading edge (no glow). */
-const COMET_HEAD_SCALE = 0.1;
 /** Arc (degrees) over which the pulse fades in after respawning. */
 const COMET_SPAWN_FADE_DEG = 5;
 /** How far above the track the pulse is drawn (km), so it never z-fights
@@ -131,7 +129,6 @@ const MOON_COMET_SWEEP_DEG = 4.5;
 const MOON_COMET_SPEED_DEG_S = 0.35;
 const MOON_COMET_HEAD_OPACITY = 0.95;
 const MOON_COMET_TAIL_OPACITY = 0.3;
-const MOON_COMET_HEAD_SCALE = 0.1;
 const MOON_COMET_SPAWN_FADE_DEG = 2.5;
 
 /**
@@ -360,29 +357,6 @@ function makeGlowSprite(color: string): THREE.Sprite {
   return sprite;
 }
 
-/** A solid hard-edged dot (no glow, no gradient) — the pulse's leading edge,
- * so the direction indicator is visible without zooming in and never blurs. */
-function makeSolidDotSprite(color: string): THREE.Sprite {
-  const size = 32;
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d")!;
-  ctx.beginPath();
-  ctx.arc(size / 2, size / 2, size / 2 - 1, 0, Math.PI * 2);
-  ctx.fillStyle = color;
-  ctx.fill();
-  const texture = new THREE.CanvasTexture(canvas);
-  const sprite = new THREE.Sprite(
-    new THREE.SpriteMaterial({
-      map: texture,
-      transparent: true,
-      depthWrite: false,
-    }),
-  );
-  return sprite;
-}
-
 /** A 2-vertex line segment of the direction-of-travel pulse, drawn just above
  * the ground track with a hard edge (no glow). */
 interface CometSegment {
@@ -409,8 +383,6 @@ interface GlobeSatellite {
   /** One-way direction-of-travel pulse — crisp sub-segments along the future
    * track, bright at the leading edge and stepping down behind it. */
   cometSegments: CometSegment[];
-  /** Crisp solid dot riding the pulse's leading edge (no glow). */
-  cometHead: THREE.Sprite;
   /** Distance the comet head has traveled ahead of the dot (radians). */
   cometDist: number;
   /** Per-track-vertex flag: watchable from the observer (elevation above
@@ -519,11 +491,6 @@ function buildSatellite(
           (i / (COMET_SEGMENTS - 1)),
     ),
   );
-  // Crisp solid leading-edge dot (no glow) — the pulse is visible even at
-  // full-globe zoom.
-  const cometHead = makeSolidDotSprite(pulseColor.getStyle());
-  cometHead.scale.set(COMET_HEAD_SCALE, COMET_HEAD_SCALE, 1);
-
   return {
     tle,
     times,
@@ -534,7 +501,6 @@ function buildSatellite(
     core,
     halo,
     cometSegments,
-    cometHead,
     cometDist: 0,
     watchable,
     passGeometry,
@@ -667,7 +633,6 @@ function createGlobeView(
   // range (updated on every path advance), so the pulse always samples the
   // same polyline the line is drawn from.
   let moonCometSegments: CometSegment[] = [];
-  let moonCometHead: THREE.Sprite | null = null;
   let moonCometDist = 0;
   let moonFutureStart = 0;
   let moonFutureEnd = 0;
@@ -688,7 +653,6 @@ function createGlobeView(
         sat.passLine,
         sat.core,
         sat.halo,
-        sat.cometHead,
         ...sat.cometSegments.map((segment) => segment.line),
       );
       sat.pastGeometry.dispose();
@@ -701,8 +665,6 @@ function createGlobeView(
       (sat.core.material as THREE.Material).dispose();
       (sat.halo.material as THREE.SpriteMaterial).map?.dispose();
       (sat.halo.material as THREE.Material).dispose();
-      (sat.cometHead.material as THREE.SpriteMaterial).map?.dispose();
-      (sat.cometHead.material as THREE.Material).dispose();
       for (const segment of sat.cometSegments) {
         segment.geometry.dispose();
         (segment.line.material as THREE.Material).dispose();
@@ -718,7 +680,6 @@ function createGlobeView(
         sat.passLine,
         sat.core,
         sat.halo,
-        sat.cometHead,
         ...sat.cometSegments.map((segment) => segment.line),
       );
       sats.set(tle.noradId, sat);
@@ -752,11 +713,6 @@ function createGlobeView(
         (object.material as THREE.SpriteMaterial).map?.dispose();
       }
     }
-    if (moonCometHead) {
-      earthGroup.remove(moonCometHead);
-      (moonCometHead.material as THREE.SpriteMaterial).map?.dispose();
-      (moonCometHead.material as THREE.Material).dispose();
-    }
     for (const segment of moonCometSegments) {
       earthGroup.remove(segment.line);
       segment.geometry.dispose();
@@ -766,7 +722,6 @@ function createGlobeView(
     moonPastLine = null;
     moonFutureLine = null;
     moonCometSegments = [];
-    moonCometHead = null;
     moonCometDist = 0;
 
     // Marker at the current sub-point, just above the surface.
@@ -860,13 +815,6 @@ function createGlobeView(
             (i / (MOON_COMET_SEGMENTS - 1)),
       ),
     );
-    moonCometHead = makeSolidDotSprite(moonPulseColor.getStyle());
-    moonCometHead.scale.set(
-      MOON_COMET_HEAD_SCALE,
-      MOON_COMET_HEAD_SCALE,
-      1,
-    );
-    earthGroup.add(moonCometHead);
   };
 
   const setSelected = (id: string | null) => {
@@ -1112,16 +1060,11 @@ function createGlobeView(
           (segment.line.material as THREE.LineBasicMaterial).opacity =
             segment.opacity * spawnFade;
         }
-        // The crisp leading-edge dot rides the front of the pulse.
-        sat.cometHead.position.copy(cometPulsePositions[COMET_SEGMENTS]);
-        (sat.cometHead.material as THREE.SpriteMaterial).opacity =
-          COMET_HEAD_OPACITY * spawnFade;
       } else {
         // No future vertices left in the track window — nothing to sweep.
         for (const segment of sat.cometSegments) {
           (segment.line.material as THREE.LineBasicMaterial).opacity = 0;
         }
-        (sat.cometHead.material as THREE.SpriteMaterial).opacity = 0;
       }
 
       // Visible-pass highlight: the lime arc over the future track where
@@ -1276,17 +1219,9 @@ function createGlobeView(
         (segment.line.material as THREE.LineBasicMaterial).opacity =
           segment.opacity * spawnFade;
       }
-      if (moonCometHead) {
-        moonCometHead.position.copy(moonPulsePositions[MOON_COMET_SEGMENTS]);
-        (moonCometHead.material as THREE.SpriteMaterial).opacity =
-          MOON_COMET_HEAD_OPACITY * spawnFade;
-      }
     } else if (moonCometSegments.length > 0) {
       for (const segment of moonCometSegments) {
         (segment.line.material as THREE.LineBasicMaterial).opacity = 0;
-      }
-      if (moonCometHead) {
-        (moonCometHead.material as THREE.SpriteMaterial).opacity = 0;
       }
     }
 
