@@ -1,11 +1,26 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import { describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { createMemoryDb } from "./db/memory";
+import type { SkyDb } from "./db/types";
+
+// One PGlite per file (its WASM compile is a ~10s one-time cost); tests get
+// isolation via a full table wipe instead of a fresh instance.
+let db: SkyDb;
+
+beforeAll(async () => {
+  db = await createMemoryDb();
+});
+
+beforeEach(async () => {
+  await db.exec(
+    `DELETE FROM email_events;
+     DELETE FROM push_logs;
+     DELETE FROM alert_logs;
+     DELETE FROM push_subscriptions;
+     DELETE FROM alert_subscriptions;`,
+  );
+});
 import {
   applyEmailWebhookEvent,
-  createSkyDb,
   disableSubscription,
   disablePushSubscription,
   insertAlertLogIfNotExists,
@@ -17,18 +32,17 @@ import {
   verifySubscription,
 } from "./db";
 
-describe("SQLite data layer", () => {
-  it("keeps one subscription per email — a new location updates in place", () => {
-    const db = createSkyDb(":memory:");
+describe("data layer", () => {
+  it("keeps one subscription per email — a new location updates in place", async () => {
 
-    const first = upsertSubscription(db, {
+    const first = await upsertSubscription(db, {
       email: "a@b.co",
       lat: 40.7,
       lon: -74,
       events: "iss",
     });
     // Same email at a different location: same row, location + events move.
-    const second = upsertSubscription(db, {
+    const second = await upsertSubscription(db, {
       email: "a@b.co",
       lat: 51.5,
       lon: -0.1,
@@ -36,20 +50,18 @@ describe("SQLite data layer", () => {
     });
 
     expect(second.id).toBe(first.id);
-    const row = db
-      .prepare(
-        "SELECT lat, lon, events FROM alert_subscriptions WHERE email = 'a@b.co'",
-      )
-      .get() as { lat: number; lon: number; events: string };
+    const row = (await db.get(
+      "SELECT lat, lon, events FROM alert_subscriptions WHERE email = $1",
+      ["a@b.co"],
+    )) as { lat: number; lon: number; events: string };
     expect(row.lat).toBe(51.5);
     expect(row.lon).toBe(-0.1);
     expect(row.events).toBe("iss,showers");
-    expect(listEnabledSubscriptions(db)).toHaveLength(1);
+    expect(await listEnabledSubscriptions(db)).toHaveLength(1);
   });
 
-  it("dedupes alerts per subscription + event + UTC day", () => {
-    const db = createSkyDb(":memory:");
-    const { id } = upsertSubscription(db, {
+  it("dedupes alerts per subscription + event + UTC day", async () => {
+    const { id } = await upsertSubscription(db, {
       email: "a@b.co",
       lat: 40.7,
       lon: -74,
@@ -63,35 +75,34 @@ describe("SQLite data layer", () => {
       dateKey: "2026-08-11",
     };
 
-    expect(insertAlertLogIfNotExists(db, log)).toBe(true);
+    expect(await insertAlertLogIfNotExists(db, log)).toBe(true);
     // Same event, same day — deduplicated.
-    expect(insertAlertLogIfNotExists(db, log)).toBe(false);
+    expect(await insertAlertLogIfNotExists(db, log)).toBe(false);
     // A different event on the same day is allowed.
-    expect(insertAlertLogIfNotExists(db, { ...log, eventType: "aurora" })).toBe(
-      true,
-    );
+    expect(
+      await insertAlertLogIfNotExists(db, { ...log, eventType: "aurora" }),
+    ).toBe(true);
     // The same event on a new day is allowed.
     expect(
-      insertAlertLogIfNotExists(db, { ...log, dateKey: "2026-08-12" }),
+      await insertAlertLogIfNotExists(db, { ...log, dateKey: "2026-08-12" }),
     ).toBe(true);
   });
 
-  it("lists only enabled + verified subscriptions", () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+  it("lists only enabled + verified subscriptions", async () => {
+    await upsertSubscription(db, {
       email: "a@b.co",
       lat: 40.7,
       lon: -74,
       events: "iss",
     });
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "c@d.co",
       lat: 51.5,
       lon: -0.1,
       events: "aurora",
     });
     // Unverified (double opt-in pending) — must never be listed.
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "pending@e.co",
       lat: 10,
       lon: 20,
@@ -99,18 +110,18 @@ describe("SQLite data layer", () => {
       verified: false,
     });
 
-    db.prepare(
-      "UPDATE alert_subscriptions SET enabled = 0 WHERE email = ?",
-    ).run("c@d.co");
+    await db.run(
+      "UPDATE alert_subscriptions SET enabled = 0 WHERE email = $1",
+      ["c@d.co"],
+    );
 
-    const listed = listEnabledSubscriptions(db);
+    const listed = await listEnabledSubscriptions(db);
     expect(listed).toHaveLength(1);
     expect(listed[0].email).toBe("a@b.co");
   });
 
-  it("never mutates a verified row on an unverified re-submit — changes wait for confirmation", () => {
-    const db = createSkyDb(":memory:");
-    const first = upsertSubscription(db, {
+  it("never mutates a verified row on an unverified re-submit — changes wait for confirmation", async () => {
+    const first = await upsertSubscription(db, {
       email: "a@b.co",
       lat: 40.7,
       lon: -74,
@@ -120,7 +131,7 @@ describe("SQLite data layer", () => {
     // An unverified request (double opt-in pending) tries to change the
     // events and the location — neither must apply, and the owner's token
     // must not rotate.
-    const second = upsertSubscription(db, {
+    const second = await upsertSubscription(db, {
       email: "a@b.co",
       lat: 51.5,
       lon: -0.1,
@@ -130,14 +141,13 @@ describe("SQLite data layer", () => {
     expect(second.verified).toBe(true);
     expect(second.unsubscribeToken).toBe(first.unsubscribeToken);
     expect(second.pendingChange).toBe(true);
-    const row = db
-      .prepare(
-        `SELECT events, enabled, lat, lon,
-                pending_events AS pendingEvents,
-                pending_lat AS pendingLat, pending_lon AS pendingLon
-         FROM alert_subscriptions WHERE email = 'a@b.co'`,
-      )
-      .get() as {
+    const row = (await db.get(
+      `SELECT events, enabled, lat, lon,
+              pending_events AS "pendingEvents",
+              pending_lat AS "pendingLat", pending_lon AS "pendingLon"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["a@b.co"],
+    )) as {
       events: string;
       enabled: number;
       lat: number;
@@ -155,15 +165,14 @@ describe("SQLite data layer", () => {
     expect(row.pendingLon).toBe(-0.1);
 
     // The owner confirming the email is what authorizes the changes.
-    expect(verifySubscription(db, second.verifyToken)).toBe(true);
-    const after = db
-      .prepare(
-        `SELECT events, enabled, lat, lon,
-                pending_events AS pendingEvents,
-                pending_lat AS pendingLat, pending_lon AS pendingLon
-         FROM alert_subscriptions WHERE email = 'a@b.co'`,
-      )
-      .get() as {
+    expect(await verifySubscription(db, second.verifyToken)).toBe(true);
+    const after = (await db.get(
+      `SELECT events, enabled, lat, lon,
+              pending_events AS "pendingEvents",
+              pending_lat AS "pendingLat", pending_lon AS "pendingLon"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["a@b.co"],
+    )) as {
       events: string;
       enabled: number;
       lat: number;
@@ -181,25 +190,22 @@ describe("SQLite data layer", () => {
     expect(after.pendingLon).toBeNull();
   });
 
-  it("cannot re-enable an opted-out subscription without confirmation", () => {
-    const db = createSkyDb(":memory:");
-    const first = upsertSubscription(db, {
+  it("cannot re-enable an opted-out subscription without confirmation", async () => {
+    const first = await upsertSubscription(db, {
       email: "out@x.co",
       lat: 10,
       lon: 20,
       events: "iss",
     });
-    disableSubscription(db, first.unsubscribeToken);
+    await disableSubscription(db, first.unsubscribeToken);
     expect(
-      (
-        db.prepare("SELECT enabled FROM alert_subscriptions").get() as {
-          enabled: number;
-        }
-      ).enabled,
+      ((await db.get("SELECT enabled FROM alert_subscriptions")) as {
+        enabled: number;
+      }).enabled,
     ).toBe(0);
 
     // Same events, but the request is unverified — re-enabling is parked too.
-    const resubmit = upsertSubscription(db, {
+    const resubmit = await upsertSubscription(db, {
       email: "out@x.co",
       lat: 10,
       lon: 20,
@@ -208,28 +214,23 @@ describe("SQLite data layer", () => {
     });
     expect(resubmit.pendingChange).toBe(true);
     expect(
-      (
-        db.prepare("SELECT enabled FROM alert_subscriptions").get() as {
-          enabled: number;
-        }
-      ).enabled,
+      ((await db.get("SELECT enabled FROM alert_subscriptions")) as {
+        enabled: number;
+      }).enabled,
     ).toBe(0);
 
     // Confirming the email re-enables and clears the pending change.
-    expect(verifySubscription(db, resubmit.verifyToken)).toBe(true);
-    const after = db
-      .prepare(
-        `SELECT enabled, pending_events AS pendingEvents
-         FROM alert_subscriptions`,
-      )
-      .get() as { enabled: number; pendingEvents: string | null };
+    expect(await verifySubscription(db, resubmit.verifyToken)).toBe(true);
+    const after = (await db.get(
+      `SELECT enabled, pending_events AS "pendingEvents"
+       FROM alert_subscriptions`,
+    )) as { enabled: number; pendingEvents: string | null };
     expect(after.enabled).toBe(1);
     expect(after.pendingEvents).toBeNull();
   });
 
-  it("stores per-subscription satellite ids (NULL = server default)", () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+  it("stores per-subscription satellite ids (NULL = server default)", async () => {
+    await upsertSubscription(db, {
       email: "multi@x.co",
       lat: 40.7,
       lon: -74,
@@ -237,25 +238,24 @@ describe("SQLite data layer", () => {
       satelliteIds: "48274,25544",
     });
 
-    const listed = listEnabledSubscriptions(db);
+    const listed = await listEnabledSubscriptions(db);
     expect(listed).toHaveLength(1);
     expect(listed[0].satelliteIds).toBe("48274,25544");
 
     // No selection → NULL, so the checker falls back to the server set.
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "default@x.co",
       lat: 51.5,
       lon: -0.1,
       events: "iss",
     });
-    const [multi, fallback] = listEnabledSubscriptions(db);
+    const [multi, fallback] = await listEnabledSubscriptions(db);
     expect(multi.satelliteIds).toBe("48274,25544");
     expect(fallback.satelliteIds).toBeNull();
   });
 
-  it("parks a satellite change from an unverified re-submit until confirmation", () => {
-    const db = createSkyDb(":memory:");
-    const first = upsertSubscription(db, {
+  it("parks a satellite change from an unverified re-submit until confirmation", async () => {
+    const first = await upsertSubscription(db, {
       email: "a@b.co",
       lat: 40.7,
       lon: -74,
@@ -265,7 +265,7 @@ describe("SQLite data layer", () => {
 
     // Unverified re-submit asks to track a different satellite — the stored
     // ids must NOT change until the owner confirms the email.
-    const second = upsertSubscription(db, {
+    const second = await upsertSubscription(db, {
       email: "a@b.co",
       lat: 40.7,
       lon: -74,
@@ -275,13 +275,12 @@ describe("SQLite data layer", () => {
     });
     expect(second.pendingChange).toBe(true);
     expect(second.unsubscribeToken).toBe(first.unsubscribeToken);
-    const row = db
-      .prepare(
-        `SELECT satellite_ids AS satelliteIds,
-                pending_satellite_ids AS pendingSatelliteIds
-         FROM alert_subscriptions WHERE email = 'a@b.co'`,
-      )
-      .get() as {
+    const row = (await db.get(
+      `SELECT satellite_ids AS "satelliteIds",
+              pending_satellite_ids AS "pendingSatelliteIds"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["a@b.co"],
+    )) as {
       satelliteIds: string | null;
       pendingSatelliteIds: string | null;
     };
@@ -289,14 +288,13 @@ describe("SQLite data layer", () => {
     expect(row.pendingSatelliteIds).toBe("48274"); // parked
 
     // Confirming applies the parked satellite change.
-    expect(verifySubscription(db, second.verifyToken)).toBe(true);
-    const after = db
-      .prepare(
-        `SELECT satellite_ids AS satelliteIds,
-                pending_satellite_ids AS pendingSatelliteIds
-         FROM alert_subscriptions WHERE email = 'a@b.co'`,
-      )
-      .get() as {
+    expect(await verifySubscription(db, second.verifyToken)).toBe(true);
+    const after = (await db.get(
+      `SELECT satellite_ids AS "satelliteIds",
+              pending_satellite_ids AS "pendingSatelliteIds"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["a@b.co"],
+    )) as {
       satelliteIds: string | null;
       pendingSatelliteIds: string | null;
     };
@@ -304,16 +302,15 @@ describe("SQLite data layer", () => {
     expect(after.pendingSatelliteIds).toBeNull();
   });
 
-  it("a never-confirmed row still gets fresh tokens on every re-submit", () => {
-    const db = createSkyDb(":memory:");
-    const pending = upsertSubscription(db, {
+  it("a never-confirmed row still gets fresh tokens on every re-submit", async () => {
+    const pending = await upsertSubscription(db, {
       email: "p@q.co",
       lat: 1,
       lon: 2,
       events: "iss",
       verified: false,
     });
-    const pendingAgain = upsertSubscription(db, {
+    const pendingAgain = await upsertSubscription(db, {
       email: "p@q.co",
       lat: 1,
       lon: 2,
@@ -324,9 +321,8 @@ describe("SQLite data layer", () => {
     expect(pendingAgain.unsubscribeToken).not.toBe(pending.unsubscribeToken);
   });
 
-  it("confirms subscriptions by verify token", () => {
-    const db = createSkyDb(":memory:");
-    const { verifyToken } = upsertSubscription(db, {
+  it("confirms subscriptions by verify token", async () => {
+    const { verifyToken } = await upsertSubscription(db, {
       email: "a@b.co",
       lat: 40.7,
       lon: -74,
@@ -334,31 +330,29 @@ describe("SQLite data layer", () => {
       verified: false,
     });
 
-    expect(listEnabledSubscriptions(db)).toHaveLength(0);
-    expect(verifySubscription(db, "bogus")).toBe(false);
-    expect(verifySubscription(db, verifyToken)).toBe(true);
-    expect(listEnabledSubscriptions(db)).toHaveLength(1);
+    expect(await listEnabledSubscriptions(db)).toHaveLength(0);
+    expect(await verifySubscription(db, "bogus")).toBe(false);
+    expect(await verifySubscription(db, verifyToken)).toBe(true);
+    expect(await listEnabledSubscriptions(db)).toHaveLength(1);
   });
 
-  it("disables subscriptions by unsubscribe token", () => {
-    const db = createSkyDb(":memory:");
-    const { unsubscribeToken } = upsertSubscription(db, {
+  it("disables subscriptions by unsubscribe token", async () => {
+    const { unsubscribeToken } = await upsertSubscription(db, {
       email: "a@b.co",
       lat: 40.7,
       lon: -74,
       events: "iss",
     });
 
-    expect(listEnabledSubscriptions(db)).toHaveLength(1);
-    expect(disableSubscription(db, "bogus")).toBe(false);
-    expect(disableSubscription(db, unsubscribeToken)).toBe(true);
-    expect(listEnabledSubscriptions(db)).toHaveLength(0);
+    expect(await listEnabledSubscriptions(db)).toHaveLength(1);
+    expect(await disableSubscription(db, "bogus")).toBe(false);
+    expect(await disableSubscription(db, unsubscribeToken)).toBe(true);
+    expect(await listEnabledSubscriptions(db)).toHaveLength(0);
   });
 
-  it("stores and disables push subscriptions by endpoint", () => {
-    const db = createSkyDb(":memory:");
+  it("stores and disables push subscriptions by endpoint", async () => {
     const endpoint = "https://push.example.com/abc";
-    const id = upsertPushSubscription(db, {
+    const id = await upsertPushSubscription(db, {
       endpoint,
       p256dh: "key1",
       auth: "auth1",
@@ -368,10 +362,10 @@ describe("SQLite data layer", () => {
     });
 
     expect(id).toBeTruthy();
-    expect(listEnabledPushSubscriptions(db)).toHaveLength(1);
+    expect(await listEnabledPushSubscriptions(db)).toHaveLength(1);
 
     // Re-registering the same endpoint updates in place, no duplicates.
-    upsertPushSubscription(db, {
+    await upsertPushSubscription(db, {
       endpoint,
       p256dh: "key2",
       auth: "auth2",
@@ -379,23 +373,22 @@ describe("SQLite data layer", () => {
       lon: -74,
       events: "iss",
     });
-    expect(listEnabledPushSubscriptions(db)).toHaveLength(1);
-    expect(listEnabledPushSubscriptions(db)[0].p256dh).toBe("key2");
+    expect(await listEnabledPushSubscriptions(db)).toHaveLength(1);
+    expect((await listEnabledPushSubscriptions(db))[0].p256dh).toBe("key2");
 
-    expect(disablePushSubscription(db, endpoint)).toBe(true);
-    expect(listEnabledPushSubscriptions(db)).toHaveLength(0);
+    expect(await disablePushSubscription(db, endpoint)).toBe(true);
+    expect(await listEnabledPushSubscriptions(db)).toHaveLength(0);
   });
 
-  it("marks a permanent bounce as failed and disables the subscription", () => {
-    const db = createSkyDb(":memory:");
-    const { id } = upsertSubscription(db, {
+  it("marks a permanent bounce as failed and disables the subscription", async () => {
+    const { id } = await upsertSubscription(db, {
       email: "bounce@x.co",
       lat: 40.7,
       lon: -74,
       events: "iss",
     });
 
-    const affected = applyEmailWebhookEvent(db, {
+    const affected = await applyEmailWebhookEvent(db, {
       email: "bounce@x.co",
       eventType: "email.bounced",
       emailId: "email_123",
@@ -404,12 +397,11 @@ describe("SQLite data layer", () => {
     });
 
     expect(affected).toBe(id);
-    const row = db
-      .prepare(
-        `SELECT enabled, email_status AS emailStatus, bounced_at AS bouncedAt
-         FROM alert_subscriptions WHERE email = 'bounce@x.co'`,
-      )
-      .get() as {
+    const row = (await db.get(
+      `SELECT enabled, email_status AS "emailStatus", bounced_at AS "bouncedAt"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["bounce@x.co"],
+    )) as {
       enabled: number;
       emailStatus: string;
       bouncedAt: string | null;
@@ -417,49 +409,46 @@ describe("SQLite data layer", () => {
     expect(row.enabled).toBe(0);
     expect(row.emailStatus).toBe("bounced");
     expect(row.bouncedAt).toBeTruthy();
-    expect(listEnabledSubscriptions(db)).toHaveLength(0);
+    expect(await listEnabledSubscriptions(db)).toHaveLength(0);
 
     // The event itself is tracked in the email_events log.
-    const events = listEmailEvents(db, "bounce@x.co");
+    const events = await listEmailEvents(db, "bounce@x.co");
     expect(events).toHaveLength(1);
     expect(events[0].eventType).toBe("email.bounced");
     expect(events[0].emailId).toBe("email_123");
   });
 
-  it("keeps a transient bounce enabled (Resend retries those)", () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+  it("keeps a transient bounce enabled (Resend retries those)", async () => {
+    await upsertSubscription(db, {
       email: "soft@x.co",
       lat: 1,
       lon: 2,
       events: "iss",
     });
 
-    const affected = applyEmailWebhookEvent(db, {
+    const affected = await applyEmailWebhookEvent(db, {
       email: "soft@x.co",
       eventType: "email.bounced",
       bounceType: "Transient",
     });
     expect(affected).toBeTruthy();
-    const row = db
-      .prepare(
-        `SELECT enabled, email_status AS emailStatus
-         FROM alert_subscriptions WHERE email = 'soft@x.co'`,
-      )
-      .get() as { enabled: number; emailStatus: string };
+    const row = (await db.get(
+      `SELECT enabled, email_status AS "emailStatus"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["soft@x.co"],
+    )) as { enabled: number; emailStatus: string };
     expect(row.enabled).toBe(1); // still delivering
     expect(row.emailStatus).toBe("bounced"); // but the failure is recorded
   });
 
-  it("disables subscriptions on spam complaints and records deliveries", () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+  it("disables subscriptions on spam complaints and records deliveries", async () => {
+    await upsertSubscription(db, {
       email: "complaint@x.co",
       lat: 1,
       lon: 2,
       events: "iss",
     });
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "happy@x.co",
       lat: 3,
       lon: 4,
@@ -467,110 +456,49 @@ describe("SQLite data layer", () => {
     });
 
     expect(
-      applyEmailWebhookEvent(db, {
+      await applyEmailWebhookEvent(db, {
         email: "complaint@x.co",
         eventType: "email.complained",
       }),
     ).toBeTruthy();
     expect(
-      applyEmailWebhookEvent(db, {
+      await applyEmailWebhookEvent(db, {
         email: "happy@x.co",
         eventType: "email.delivered",
         emailId: "email_9",
       }),
     ).toBeTruthy();
 
-    const complained = db
-      .prepare(
-        `SELECT enabled, email_status AS emailStatus
-         FROM alert_subscriptions WHERE email = 'complaint@x.co'`,
-      )
-      .get() as { enabled: number; emailStatus: string };
+    const complained = (await db.get(
+      `SELECT enabled, email_status AS "emailStatus"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["complaint@x.co"],
+    )) as { enabled: number; emailStatus: string };
     expect(complained.enabled).toBe(0);
     expect(complained.emailStatus).toBe("complained");
 
-    const delivered = db
-      .prepare(
-        `SELECT enabled, email_status AS emailStatus
-         FROM alert_subscriptions WHERE email = 'happy@x.co'`,
-      )
-      .get() as { enabled: number; emailStatus: string };
+    const delivered = (await db.get(
+      `SELECT enabled, email_status AS "emailStatus"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["happy@x.co"],
+    )) as { enabled: number; emailStatus: string };
     expect(delivered.enabled).toBe(1);
     expect(delivered.emailStatus).toBe("delivered");
 
     // Both events are on the log; deliveries land after bounces per address.
-    expect(listEmailEvents(db, "happy@x.co")[0].eventType).toBe(
+    expect((await listEmailEvents(db, "happy@x.co"))[0].eventType).toBe(
       "email.delivered",
     );
   });
 
-  it("logs events for addresses without a subscription and returns null", () => {
-    const db = createSkyDb(":memory:");
+  it("logs events for addresses without a subscription and returns null", async () => {
     expect(
-      applyEmailWebhookEvent(db, {
+      await applyEmailWebhookEvent(db, {
         email: "ghost@x.co",
         eventType: "email.bounced",
         bounceType: "Permanent",
       }),
     ).toBeNull();
-    expect(listEmailEvents(db, "ghost@x.co")).toHaveLength(1);
-  });
-
-  it("migrates legacy (email, lat, lon) databases to one row per email", () => {
-    const dir = mkdtempSync(join(tmpdir(), "sky-db-"));
-    const path = join(dir, "legacy.db");
-    try {
-      // A pre-v0.3.1 database: unique per (email, lat, lon), so the same
-      // address at two locations exists as two rows.
-      const legacy = new DatabaseSync(path);
-      legacy.exec(`CREATE TABLE alert_subscriptions (
-        id                    TEXT PRIMARY KEY,
-        email                 TEXT NOT NULL,
-        lat                   REAL NOT NULL,
-        lon                   REAL NOT NULL,
-        events                TEXT NOT NULL DEFAULT 'iss,aurora,showers',
-        satellite_ids         TEXT,
-        pending_satellite_ids TEXT,
-        enabled               INTEGER NOT NULL DEFAULT 1,
-        created_at            TEXT NOT NULL DEFAULT (datetime('now')),
-        verified              INTEGER NOT NULL DEFAULT 0,
-        verify_token          TEXT,
-        unsubscribe_token     TEXT,
-        pending_events        TEXT,
-        UNIQUE(email, lat, lon)
-      );`);
-      const insert = legacy.prepare(
-        `INSERT INTO alert_subscriptions
-           (id, email, lat, lon, events, verified, unsubscribe_token)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      );
-      insert.run("stale", "dup@x.co", 30, 40, "aurora", 0, "stale-token");
-      insert.run("owner", "dup@x.co", 10, 20, "iss", 1, "owner-token");
-      insert.run("solo", "solo@y.co", 5, 5, "iss", 1, "solo-token");
-      legacy.close();
-
-      const db = createSkyDb(path); // runs the migration on startup
-      const rows = db
-        .prepare("SELECT id, lat, lon FROM alert_subscriptions ORDER BY id")
-        .all() as { id: string; lat: number; lon: number }[];
-      // The verified owner row survives; the stale duplicate is dropped.
-      expect(rows).toEqual([
-        { id: "owner", lat: 10, lon: 20 },
-        { id: "solo", lat: 5, lon: 5 },
-      ]);
-      // The migrated table is unique per email: another row now conflicts.
-      expect(() =>
-        db
-          .prepare(
-            `INSERT INTO alert_subscriptions
-               (id, email, lat, lon, events)
-             VALUES ('another', 'dup@x.co', 99, 99, 'iss')`,
-          )
-          .run(),
-      ).toThrow();
-      db.close();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    expect(await listEmailEvents(db, "ghost@x.co")).toHaveLength(1);
   });
 });

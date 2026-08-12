@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
     return jsonError("A verification token is required.", 400, "MISSING_TOKEN");
   }
 
-  const found = verifySubscription(getDb(), token);
+  const found = await verifySubscription(await getDb(), token);
   if (!found) {
     return jsonError(
       "That confirmation link is invalid or has already been used.",

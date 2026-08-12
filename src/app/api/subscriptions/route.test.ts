@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // In-memory DB for every route test — read lazily by getDb().
-vi.stubEnv("SKY_DB_PATH", ":memory:");
+vi.stubEnv("DATABASE_URL", ":memory:");
 vi.stubEnv("SITE_URL", "https://example.test");
 
 import { NextRequest } from "next/server";
@@ -28,15 +28,35 @@ const VALID_BODY = {
   events: ["iss", "aurora"],
 };
 
-function resetDb() {
-  (globalThis as { skyDb?: unknown }).skyDb = undefined;
+// Wipe all tables but keep the one shared PGlite instance — recreating it per
+// test would pay PGlite's ~10s WASM compile every time.
+async function resetDb() {
+  const db = await getDb();
+  await db.exec(
+    `DELETE FROM email_events;
+     DELETE FROM push_logs;
+     DELETE FROM alert_logs;
+     DELETE FROM push_subscriptions;
+     DELETE FROM alert_subscriptions;`,
+  );
+}
+
+async function selectRow<T extends object>(
+  sql: string,
+  params: unknown[] = [],
+): Promise<T> {
+  const row = await (await getDb()).get<T>(sql, params);
+  if (!row) {
+    throw new Error("Expected a row");
+  }
+  return row;
 }
 
 describe("POST /api/subscriptions", () => {
-  beforeEach(() => {
-    resetDb();
+  beforeEach(async () => {
+    await resetDb();
     vi.unstubAllEnvs();
-    vi.stubEnv("SKY_DB_PATH", ":memory:");
+    vi.stubEnv("DATABASE_URL", ":memory:");
     vi.stubEnv("SITE_URL", "https://example.test");
     vi.unstubAllGlobals();
   });
@@ -54,7 +74,7 @@ describe("POST /api/subscriptions", () => {
     // Unsubscribe tokens only ever travel inside alert emails, never in
     // unauthenticated API responses.
     expect(body.data.unsubscribeToken).toBeUndefined();
-    expect(listEnabledSubscriptions(getDb())).toHaveLength(1);
+    expect(await listEnabledSubscriptions(await getDb())).toHaveLength(1);
   });
 
   it("validates the email, coordinates and events", async () => {
@@ -90,12 +110,11 @@ describe("POST /api/subscriptions", () => {
     );
     expect(response.status).toBe(201);
 
-    const row = getDb()
-      .prepare(
-        `SELECT satellite_ids AS satelliteIds
-         FROM alert_subscriptions WHERE email = ?`,
-      )
-      .get(VALID_BODY.email) as { satelliteIds: string | null };
+    const row = await selectRow<{ satelliteIds: string | null }>(
+      `SELECT satellite_ids AS "satelliteIds"
+       FROM alert_subscriptions WHERE email = $1`,
+      [VALID_BODY.email],
+    );
     expect(row.satelliteIds).toBe("48274,25544");
 
     // Without a selection the row stores NULL → server-configured set.
@@ -109,12 +128,11 @@ describe("POST /api/subscriptions", () => {
         "203.0.113.22",
       ),
     );
-    const plain = getDb()
-      .prepare(
-        `SELECT satellite_ids AS satelliteIds
-         FROM alert_subscriptions WHERE email = 'plain@example.com'`,
-      )
-      .get() as { satelliteIds: string | null };
+    const plain = await selectRow<{ satelliteIds: string | null }>(
+      `SELECT satellite_ids AS "satelliteIds"
+       FROM alert_subscriptions WHERE email = $1`,
+      ["plain@example.com"],
+    );
     expect(plain.satelliteIds).toBeNull();
   });
 
@@ -173,36 +191,35 @@ describe("POST /api/subscriptions", () => {
     expect(payload.text).toContain("https://example.test/verify?token=");
 
     // Not yet listed for the alert engine…
-    expect(listEnabledSubscriptions(getDb())).toHaveLength(0);
+    expect(await listEnabledSubscriptions(await getDb())).toHaveLength(0);
 
     // …until the subscriber confirms via the verify endpoint (the token is
     // only delivered inside the confirmation email, not the API response).
-    const pending = getDb()
-      .prepare(
-        `SELECT verify_token AS verifyToken FROM alert_subscriptions WHERE email = ?`,
-      )
-      .get(VALID_BODY.email) as { verifyToken: string };
+    const pending = await selectRow<{ verifyToken: string }>(
+      `SELECT verify_token AS "verifyToken"
+       FROM alert_subscriptions WHERE email = $1`,
+      [VALID_BODY.email],
+    );
     const verifyResponse = await verifyPost(
       post("/api/subscriptions/verify", { token: pending.verifyToken }),
     );
     expect(verifyResponse.status).toBe(200);
-    expect(listEnabledSubscriptions(getDb())).toHaveLength(1);
+    expect(await listEnabledSubscriptions(await getDb())).toHaveLength(1);
   });
 
   it("unsubscribes via the per-subscription token (from the DB, as email links do)", async () => {
     await subscribePost(post("/api/subscriptions", VALID_BODY));
-    const row = getDb()
-      .prepare(
-        `SELECT unsubscribe_token AS unsubscribeToken
-         FROM alert_subscriptions WHERE email = ?`,
-      )
-      .get(VALID_BODY.email) as { unsubscribeToken: string };
+    const row = await selectRow<{ unsubscribeToken: string }>(
+      `SELECT unsubscribe_token AS "unsubscribeToken"
+       FROM alert_subscriptions WHERE email = $1`,
+      [VALID_BODY.email],
+    );
 
     const response = await unsubscribePost(
       post("/api/subscriptions/unsubscribe", { token: row.unsubscribeToken }),
     );
     expect(response.status).toBe(200);
-    expect(listEnabledSubscriptions(getDb())).toHaveLength(0);
+    expect(await listEnabledSubscriptions(await getDb())).toHaveLength(0);
   });
 
   it("never exposes, rotates, or applies changes for an already-verified address", async () => {
@@ -213,22 +230,20 @@ describe("POST /api/subscriptions", () => {
     // The owner signs up and confirms via the email link.
     const first = await subscribePost(post("/api/subscriptions", VALID_BODY));
     expect((await first.json()).data.unsubscribeToken).toBeUndefined();
-    const pending = getDb()
-      .prepare(
-        `SELECT verify_token AS verifyToken
-         FROM alert_subscriptions WHERE email = ?`,
-      )
-      .get(VALID_BODY.email) as { verifyToken: string };
+    const pending = await selectRow<{ verifyToken: string }>(
+      `SELECT verify_token AS "verifyToken"
+       FROM alert_subscriptions WHERE email = $1`,
+      [VALID_BODY.email],
+    );
     await verifyPost(
       post("/api/subscriptions/verify", { token: pending.verifyToken }),
     );
     const ownerToken = (
-      getDb()
-        .prepare(
-          `SELECT unsubscribe_token AS unsubscribeToken
-         FROM alert_subscriptions WHERE email = ?`,
-        )
-        .get(VALID_BODY.email) as { unsubscribeToken: string }
+      await selectRow<{ unsubscribeToken: string }>(
+        `SELECT unsubscribe_token AS "unsubscribeToken"
+       FROM alert_subscriptions WHERE email = $1`,
+        [VALID_BODY.email],
+      )
     ).unsubscribeToken;
 
     // Someone who doesn't control the mailbox re-submits the address with
@@ -247,21 +262,20 @@ describe("POST /api/subscriptions", () => {
 
     // …and the owner gets a confirmation email before anything mutates.
     expect(resendMock).toHaveBeenCalledTimes(2);
-    const row = getDb()
-      .prepare(
-        `SELECT unsubscribe_token AS unsubscribeToken, events,
-                pending_events AS pendingEvents,
-                satellite_ids AS satelliteIds,
-                pending_satellite_ids AS pendingSatelliteIds
-         FROM alert_subscriptions WHERE email = ?`,
-      )
-      .get(VALID_BODY.email) as {
+    const row = await selectRow<{
       unsubscribeToken: string;
       events: string;
       pendingEvents: string | null;
       satelliteIds: string | null;
       pendingSatelliteIds: string | null;
-    };
+    }>(
+      `SELECT unsubscribe_token AS "unsubscribeToken", events,
+              pending_events AS "pendingEvents",
+              satellite_ids AS "satelliteIds",
+              pending_satellite_ids AS "pendingSatelliteIds"
+       FROM alert_subscriptions WHERE email = $1`,
+      [VALID_BODY.email],
+    );
     expect(row.unsubscribeToken).toBe(ownerToken);
     expect(row.events).toBe("iss,aurora");
     expect(row.pendingEvents).toBe("showers");
@@ -270,29 +284,27 @@ describe("POST /api/subscriptions", () => {
 
     // The owner's confirmation is what authorizes the changes.
     const freshVerifyToken = (
-      getDb()
-        .prepare(
-          `SELECT verify_token AS verifyToken
-         FROM alert_subscriptions WHERE email = ?`,
-        )
-        .get(VALID_BODY.email) as { verifyToken: string }
+      await selectRow<{ verifyToken: string }>(
+        `SELECT verify_token AS "verifyToken"
+       FROM alert_subscriptions WHERE email = $1`,
+        [VALID_BODY.email],
+      )
     ).verifyToken;
     await verifyPost(
       post("/api/subscriptions/verify", { token: freshVerifyToken }),
     );
-    const applied = getDb()
-      .prepare(
-        `SELECT events, pending_events AS pendingEvents,
-                satellite_ids AS satelliteIds,
-                pending_satellite_ids AS pendingSatelliteIds
-         FROM alert_subscriptions WHERE email = ?`,
-      )
-      .get(VALID_BODY.email) as {
+    const applied = await selectRow<{
       events: string;
       pendingEvents: string | null;
       satelliteIds: string | null;
       pendingSatelliteIds: string | null;
-    };
+    }>(
+      `SELECT events, pending_events AS "pendingEvents",
+              satellite_ids AS "satelliteIds",
+              pending_satellite_ids AS "pendingSatelliteIds"
+       FROM alert_subscriptions WHERE email = $1`,
+      [VALID_BODY.email],
+    );
     expect(applied.events).toBe("showers");
     expect(applied.pendingEvents).toBeNull();
     expect(applied.satelliteIds).toBe("48274");

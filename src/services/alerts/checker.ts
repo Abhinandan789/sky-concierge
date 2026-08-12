@@ -1,4 +1,3 @@
-import type { DatabaseSync } from "node:sqlite";
 import { siteUrl } from "@/config/site";
 import {
   disablePushSubscription,
@@ -10,6 +9,7 @@ import {
   removeAlertLog,
   removePushLog,
   type PushSubscriptionRow,
+  type SkyDb,
 } from "@/lib/db";
 import { logger } from "@/lib/logger";
 import {
@@ -57,7 +57,7 @@ export interface AlertCheckOptions {
   sender?: AlertSender;
   now?: Date;
   fetcher?: typeof fetch;
-  db?: DatabaseSync;
+  db?: SkyDb;
 }
 
 export interface AlertCheckResult {
@@ -231,7 +231,7 @@ async function buildCandidates(
 async function dispatchPushAlerts(params: {
   subscription: SubscriptionLike;
   candidates: DueAlert[];
-  db: DatabaseSync;
+  db: SkyDb;
   dateKey: string;
   pushSubs: PushSubscriptionRow[];
   covered: Set<string>;
@@ -259,7 +259,7 @@ async function dispatchPushAlerts(params: {
 
     for (const pushSub of matching) {
       covered.add(`${pushSub.id}:${candidate.eventType}`);
-      const claimed = insertPushLogIfNotExists(db, {
+      const claimed = await insertPushLogIfNotExists(db, {
         subscriptionId: pushSub.id,
         eventType: candidate.eventType,
         message: candidate.message.subject,
@@ -278,7 +278,7 @@ async function dispatchPushAlerts(params: {
         sent += 1;
       } catch (error) {
         // Roll back so the notification retries on the next run.
-        removePushLog(db, {
+        await removePushLog(db, {
           subscriptionId: pushSub.id,
           eventType: candidate.eventType,
           dateKey,
@@ -288,7 +288,7 @@ async function dispatchPushAlerts(params: {
         // it and move on; only transient failures rethrow for a retry.
         const statusCode = (error as { statusCode?: number }).statusCode;
         if (statusCode === 404 || statusCode === 410) {
-          disablePushSubscription(db, pushSub.endpoint);
+          await disablePushSubscription(db, pushSub.endpoint);
           logger.warn("Push endpoint expired — disabled", {
             endpoint: pushSub.endpoint,
             statusCode,
@@ -316,10 +316,10 @@ export async function runAlertCheck(
   const sender = options.sender ?? createSender();
   const now = options.now ?? new Date();
   const fetcher = options.fetcher ?? fetch;
-  const db = options.db ?? getDb();
+  const db = options.db ?? (await getDb());
 
-  const subscriptions = listEnabledSubscriptions(db);
-  const pushSubs = listEnabledPushSubscriptions(db);
+  const subscriptions = await listEnabledSubscriptions(db);
+  const pushSubs = await listEnabledPushSubscriptions(db);
   const dateKey = utcDateKey(now);
   // (push subscription id, event type) pairs already evaluated via a nearby
   // email subscription's candidates — the standalone pass skips these.
@@ -330,7 +330,7 @@ export async function runAlertCheck(
     const candidates = await buildCandidates(subscription, now, fetcher);
 
     for (const candidate of candidates) {
-      const claimed = insertAlertLogIfNotExists(db, {
+      const claimed = await insertAlertLogIfNotExists(db, {
         subscriptionId: candidate.subscriptionId,
         eventType: candidate.eventType,
         message: candidate.message.subject,
@@ -349,7 +349,7 @@ export async function runAlertCheck(
       } catch (error) {
         // Roll back the claim so a transient send failure doesn't swallow
         // the alert — the next run will retry it. Then fail loudly.
-        removeAlertLog(db, {
+        await removeAlertLog(db, {
           subscriptionId: candidate.subscriptionId,
           eventType: candidate.eventType,
           dateKey,
@@ -418,7 +418,7 @@ export interface DigestOptions {
   sender?: AlertSender;
   now?: Date;
   fetcher?: typeof fetch;
-  db?: DatabaseSync;
+  db?: SkyDb;
 }
 
 /** Compose the weekly "sky highlights" email from a computed brief. */
@@ -491,14 +491,14 @@ export async function runDigestCheck(
   const sender = options.sender ?? createSender();
   const now = options.now ?? new Date();
   const fetcher = options.fetcher ?? fetch;
-  const db = options.db ?? getDb();
+  const db = options.db ?? (await getDb());
 
   const weekKey = isoWeekKey(now);
-  const subscriptions = listEnabledSubscriptions(db);
+  const subscriptions = await listEnabledSubscriptions(db);
 
   let sent = 0;
   for (const subscription of subscriptions) {
-    const claimed = insertAlertLogIfNotExists(db, {
+    const claimed = await insertAlertLogIfNotExists(db, {
       subscriptionId: subscription.id,
       eventType: "digest",
       message: "weekly digest",
@@ -523,7 +523,7 @@ export async function runDigestCheck(
       );
       sent += 1;
     } catch (error) {
-      removeAlertLog(db, {
+      await removeAlertLog(db, {
         subscriptionId: subscription.id,
         eventType: "digest",
         dateKey: weekKey,

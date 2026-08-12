@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createMemoryDb } from "@/lib/db/memory";
+import type { SkyDb } from "@/lib/db/types";
 import {
-  createSkyDb,
   listEnabledPushSubscriptions,
   upsertPushSubscription,
   upsertSubscription,
@@ -21,6 +22,24 @@ import {
 vi.mock("./push", () => ({
   sendPush: vi.fn(async () => undefined),
 }));
+
+// One PGlite per file (its WASM compile is a ~10s one-time cost); tests get
+// isolation via a full table wipe instead of a fresh instance.
+let db: SkyDb;
+
+beforeAll(async () => {
+  db = await createMemoryDb();
+});
+
+beforeEach(async () => {
+  await db.exec(
+    `DELETE FROM email_events;
+     DELETE FROM push_logs;
+     DELETE FROM alert_logs;
+     DELETE FROM push_subscriptions;
+     DELETE FROM alert_subscriptions;`,
+  );
+});
 
 const NOW = new Date("2026-08-11T20:00:00Z");
 
@@ -218,8 +237,7 @@ describe("candidatesFromBrief", () => {
 
 describe("runAlertCheck", () => {
   it("dispatches due alerts once and dedupes on re-runs", async () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "shower@example.com",
       lat: 40.71,
       lon: -74.01,
@@ -258,8 +276,7 @@ describe("runAlertCheck", () => {
   });
 
   it("rolls back the claim and rethrows when a send fails, then retries", async () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "retry@example.com",
       lat: 40.71,
       lon: -74.01,
@@ -295,8 +312,7 @@ describe("runAlertCheck", () => {
   });
 
   it("reports zero when nothing is due (no network needed)", async () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "quiet@example.com",
       lat: 51.5,
       lon: -0.1,
@@ -315,8 +331,7 @@ describe("runAlertCheck", () => {
   });
 
   it("works with the console sender when no sender is provided", async () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "console@example.com",
       lat: 40.71,
       lon: -74.01,
@@ -337,9 +352,8 @@ describe("runAlertCheck", () => {
   });
 
   it("evaluates push-only subscriptions independently of email subscriptions", async () => {
-    const db = createSkyDb(":memory:");
     // No email subscriptions at all — just a browser that registered for push.
-    upsertPushSubscription(db, {
+    await upsertPushSubscription(db, {
       endpoint: "https://push.example.com/standalone",
       p256dh: "key",
       auth: "auth",
@@ -359,15 +373,14 @@ describe("runAlertCheck", () => {
     expect(sender.send).not.toHaveBeenCalled();
     // The push-only browser was still evaluated (0 email subs + 1 push sub).
     expect(result.checked).toBe(1);
-    const logs = db
-      .prepare(`SELECT event_type AS eventType FROM push_logs`)
-      .all() as { eventType: string }[];
+    const logs = (await db.all(
+      `SELECT event_type AS "eventType" FROM push_logs`,
+    )) as { eventType: string }[];
     expect(logs.map((log) => log.eventType)).toContain("showers");
   });
 
   it("disables a push endpoint that returns a permanent 404/410 and keeps going", async () => {
-    const db = createSkyDb(":memory:");
-    upsertPushSubscription(db, {
+    await upsertPushSubscription(db, {
       endpoint: "https://push.example.com/stale",
       p256dh: "key",
       auth: "auth",
@@ -392,19 +405,16 @@ describe("runAlertCheck", () => {
     expect(result.checked).toBe(1);
     // The revoked endpoint is disabled and the claim rolled back, so the
     // next run is clean and the endpoint is never retried.
-    expect(listEnabledPushSubscriptions(db)).toHaveLength(0);
+    expect(await listEnabledPushSubscriptions(db)).toHaveLength(0);
     expect(
-      (
-        db.prepare(`SELECT COUNT(*) AS n FROM push_logs`).get() as {
-          n: number;
-        }
-      ).n,
+      ((await db.get(
+        `SELECT COUNT(*)::int AS n FROM push_logs`,
+      )) as { n: number }).n,
     ).toBe(0);
   });
 
   it("still rethrows transient push failures for a retry", async () => {
-    const db = createSkyDb(":memory:");
-    upsertPushSubscription(db, {
+    await upsertPushSubscription(db, {
       endpoint: "https://push.example.com/flaky",
       p256dh: "key",
       auth: "auth",
@@ -423,18 +433,17 @@ describe("runAlertCheck", () => {
       }),
     ).rejects.toThrow("service down");
     // The endpoint stays enabled for the next run's retry.
-    expect(listEnabledPushSubscriptions(db)).toHaveLength(1);
+    expect(await listEnabledPushSubscriptions(db)).toHaveLength(1);
   });
 
   it("does not double-evaluate push subs already covered by a nearby email sub", async () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "nearby@example.com",
       lat: 40.71,
       lon: -74.01,
       events: "showers",
     });
-    upsertPushSubscription(db, {
+    await upsertPushSubscription(db, {
       endpoint: "https://push.example.com/covered",
       p256dh: "key",
       auth: "auth",
@@ -453,16 +462,15 @@ describe("runAlertCheck", () => {
 
     // 1 email sub evaluated; the push sub was covered by it, not re-checked.
     expect(result.checked).toBe(1);
-    const logs = db
-      .prepare(`SELECT event_type AS eventType FROM push_logs`)
-      .all() as { eventType: string }[];
+    const logs = (await db.all(
+      `SELECT event_type AS "eventType" FROM push_logs`,
+    )) as { eventType: string }[];
     expect(logs).toHaveLength(1);
     expect(logs[0].eventType).toBe("showers");
   });
 
   it("evaluates the subscriber's own satellite selection, not just the server set", async () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "multi@example.com",
       lat: 40.71,
       lon: -74.01,
@@ -500,8 +508,7 @@ describe("runAlertCheck", () => {
   });
 
   it("falls back to the server-configured set when no satellites are stored", async () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "default@example.com",
       lat: 40.71,
       lon: -74.01,
@@ -526,8 +533,7 @@ describe("runAlertCheck", () => {
   });
 
   it("appends an unsubscribe link to every emailed alert", async () => {
-    const db = createSkyDb(":memory:");
-    const { unsubscribeToken } = upsertSubscription(db, {
+    const { unsubscribeToken } = await upsertSubscription(db, {
       email: "unsub@example.com",
       lat: 40.71,
       lon: -74.01,
@@ -593,8 +599,7 @@ describe("composeDigestMessage", () => {
 
 describe("runDigestCheck", () => {
   it("sends a digest at most once per ISO week", async () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "digest@example.com",
       lat: 40.71,
       lon: -74.01,
@@ -624,8 +629,7 @@ describe("runDigestCheck", () => {
   });
 
   it("skips unverified subscriptions", async () => {
-    const db = createSkyDb(":memory:");
-    upsertSubscription(db, {
+    await upsertSubscription(db, {
       email: "pending@example.com",
       lat: 40.71,
       lon: -74.01,

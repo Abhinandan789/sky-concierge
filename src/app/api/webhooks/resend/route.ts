@@ -128,7 +128,7 @@ export async function POST(request: NextRequest) {
       : null;
 
   try {
-    const subscriptionId = applyEmailWebhookEvent(getDb(), {
+    const subscriptionId = await applyEmailWebhookEvent(await getDb(), {
       email,
       eventType: type,
       emailId,
