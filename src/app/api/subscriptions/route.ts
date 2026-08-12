@@ -108,7 +108,9 @@ export async function POST(request: NextRequest) {
 
   // With a real email sender configured we require double opt-in; without
   // one (console/dev mode) the subscription is active immediately.
-  const needsVerification = Boolean(process.env.RESEND_API_KEY);
+  const needsVerification = Boolean(
+    process.env.RESEND_API_KEY || process.env.BREVO_API_KEY,
+  );
 
   try {
     const subscription = await upsertSubscription(await getDb(), {
