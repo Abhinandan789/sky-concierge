@@ -8,10 +8,10 @@ import {
   currentGroundPoint,
   currentSatelliteTelemetry,
   observerLookAngles,
+  watchableTrack,
   type GroundTrackPoint,
 } from "@/lib/satellite-map";
 import { gstime } from "satellite.js";
-import * as SunCalc from "suncalc";
 import type { LatLon } from "@/types";
 import type { MoonTrack, MoonTrackPoint } from "@/services/sky/moon-track";
 import * as THREE from "three";
@@ -95,10 +95,6 @@ const COMET_SPAWN_FADE_DEG = 2.5;
  * satellite will actually be watchable from the observer's location
  * (above the horizon AND dark enough at the observer to see it). */
 const PASS_HIGHLIGHT_COLOR = "#a3e635";
-/** Minimum elevation (deg) for a pass to count as visible. */
-const PASS_HORIZON_DEG = 10;
-/** Sun altitude (deg) below which the observer's sky counts as dark. */
-const PASS_SUN_DARK_DEG = 0;
 
 /** Time-scrubber window: preview between 3 h in the past and 6 h ahead. */
 const SCRUB_PAST_MS = 3 * 3600_000;
@@ -396,20 +392,11 @@ function buildSatellite(
   const color = COLORS[index % COLORS.length];
   const track = computeGroundTrack(tle.line1, tle.line2);
   const times = track.map((point) => point.time);
-  // Watchability per track vertex: the pass must clear the observer's
-  // horizon AND the observer's sky must be dark enough to see it. Each
-  // vertex is evaluated at its own timestamp, so the flags stay valid
-  // no matter where the sim-clock split sits.
-  const watchable = track.map((point) => {
-    const date = new Date(point.time);
-    const look = observerLookAngles(tle.line1, tle.line2, observer, date);
-    if (!look || look.elevationDeg < PASS_HORIZON_DEG) {
-      return false;
-    }
-    // suncalc 2.x returns altitude in degrees.
-    const sun = SunCalc.getPosition(date, observer.lat, observer.lon);
-    return sun.altitude < PASS_SUN_DARK_DEG;
-  });
+  // Watchability per track vertex (shared logic with the radar): the pass
+  // must clear the observer's horizon AND the sky must be dark enough to
+  // see it. Each vertex is evaluated at its own timestamp, so the flags
+  // stay valid no matter where the sim-clock split sits.
+  const watchable = watchableTrack(tle.line1, tle.line2, observer, track);
   const makeGeometry = (liftKm = TRACK_LIFT_KM) => {
     const positions = new Float32Array(track.length * 3);
     track.forEach((point: GroundTrackPoint, i: number) => {
