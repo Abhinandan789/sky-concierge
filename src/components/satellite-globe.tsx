@@ -8,6 +8,7 @@ import {
   currentGroundPoint,
   currentSatelliteTelemetry,
   observerLookAngles,
+  watchableTrack,
   type GroundTrackPoint,
 } from "@/lib/satellite-map";
 import { gstime } from "satellite.js";
@@ -33,8 +34,7 @@ interface SatelliteGlobeProps {
   onFocusChange: (id: string | null) => void;
 }
 
-/** Earth's rotation rate about its axis (sidereal day), radians/second. */
-const SIDEREAL_RATE = (2 * Math.PI) / 86164.0905;
+/** Earth's equatorial radius, km. */
 const EARTH_RADIUS_KM = 6371;
 const TRACK_REFRESH_MS = 60_000;
 /** Lift applied to ground tracks so they don't z-fight the surface. */
@@ -90,6 +90,33 @@ const COMET_SPEED_DEG_S = 0.8;
 const COMET_HEAD_OPACITY = 0.5;
 /** Arc (degrees) over which the comet fades in after respawning. */
 const COMET_SPAWN_FADE_DEG = 2.5;
+
+/** Visible-pass highlight — a lime arc over the future track where the
+ * satellite will actually be watchable from the observer's location
+ * (above the horizon AND dark enough at the observer to see it). */
+const PASS_HIGHLIGHT_COLOR = "#a3e635";
+
+/** Time-scrubber window: preview between 3 h in the past and 6 h ahead. */
+const SCRUB_PAST_MS = 3 * 3600_000;
+const SCRUB_FUTURE_MS = 6 * 3600_000;
+
+/** Compact relative label for a clock offset, e.g. "+1h 30m", "−2h", "now". */
+function formatOffsetLabel(ms: number): string {
+  if (ms === 0) {
+    return "now";
+  }
+  const sign = ms > 0 ? "+" : "−";
+  const abs = Math.abs(ms);
+  const hours = Math.floor(abs / 3600_000);
+  const minutes = Math.round((abs % 3600_000) / 60_000);
+  if (hours > 0 && minutes > 0) {
+    return `${sign}${hours}h ${minutes}m`;
+  }
+  if (hours > 0) {
+    return `${sign}${hours}h`;
+  }
+  return `${sign}${minutes}m`;
+}
 
 /** Moon path comet — the same one-way trailing treatment, sized to the
  * Moon's slow ~15°/hour westward drift (its future window is only ~15° of
@@ -347,17 +374,33 @@ interface GlobeSatellite {
   cometTrail: THREE.Sprite[];
   /** Distance the comet head has traveled ahead of the dot (radians). */
   cometDist: number;
+  /** Per-track-vertex flag: watchable from the observer (elevation above
+   * the horizon AND dark enough) — precomputed at build time, since vertex
+   * timestamps are fixed the flags stay correct even when scrubbed. */
+  watchable: boolean[];
+  /** Lime overlay line over the watchable segment of the future track. */
+  passGeometry: THREE.BufferGeometry;
+  passLine: THREE.Line;
 }
 
 /** Build a satellite's scene objects from its TLE. */
-function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
+function buildSatellite(
+  tle: TleEntry,
+  index: number,
+  observer: LatLon,
+): GlobeSatellite {
   const color = COLORS[index % COLORS.length];
   const track = computeGroundTrack(tle.line1, tle.line2);
   const times = track.map((point) => point.time);
-  const makeGeometry = () => {
+  // Watchability per track vertex (shared logic with the radar): the pass
+  // must clear the observer's horizon AND the sky must be dark enough to
+  // see it. Each vertex is evaluated at its own timestamp, so the flags
+  // stay valid no matter where the sim-clock split sits.
+  const watchable = watchableTrack(tle.line1, tle.line2, observer, track);
+  const makeGeometry = (liftKm = TRACK_LIFT_KM) => {
     const positions = new Float32Array(track.length * 3);
     track.forEach((point: GroundTrackPoint, i: number) => {
-      const v = latLonAltToVector3(point.lat, point.lon, TRACK_LIFT_KM);
+      const v = latLonAltToVector3(point.lat, point.lon, liftKm);
       positions[i * 3] = v.x;
       positions[i * 3 + 1] = v.y;
       positions[i * 3 + 2] = v.z;
@@ -368,6 +411,9 @@ function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
   };
   const pastGeometry = makeGeometry();
   const futureGeometry = makeGeometry();
+  // The highlight sits 1 km above the track so it never z-fights the line
+  // it's overlaying (imperceptible at globe scale).
+  const passGeometry = makeGeometry(TRACK_LIFT_KM + 1);
   const pastLine = new THREE.Line(
     pastGeometry,
     new THREE.LineBasicMaterial({
@@ -382,6 +428,14 @@ function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
       color,
       transparent: true,
       opacity: TRACK_FUTURE_OPACITY,
+    }),
+  );
+  const passLine = new THREE.Line(
+    passGeometry,
+    new THREE.LineBasicMaterial({
+      color: PASS_HIGHLIGHT_COLOR,
+      transparent: true,
+      opacity: 0.85,
     }),
   );
 
@@ -410,6 +464,9 @@ function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
     halo,
     cometTrail,
     cometDist: 0,
+    watchable,
+    passGeometry,
+    passLine,
   };
 }
 
@@ -423,6 +480,10 @@ interface GlobeView {
   setSelected: (id: string | null) => void;
   /** Swing the camera to look at the observer's location on the globe. */
   centerOnObserver: () => void;
+  /** Preview time: ms added to the wall clock (0 = live). Dots, tracks, the
+   * moon and telemetry all follow it, so the scrubber can preview the sky
+   * at any moment within a few hours. */
+  setSimOffset: (offsetMs: number) => void;
   dispose: () => void;
 }
 
@@ -551,14 +612,17 @@ function createGlobeView(
       earthGroup.remove(
         sat.pastLine,
         sat.futureLine,
+        sat.passLine,
         sat.core,
         sat.halo,
         ...sat.cometTrail,
       );
       sat.pastGeometry.dispose();
       sat.futureGeometry.dispose();
+      sat.passGeometry.dispose();
       (sat.pastLine.material as THREE.Material).dispose();
       (sat.futureLine.material as THREE.Material).dispose();
+      (sat.passLine.material as THREE.Material).dispose();
       (sat.core.material as THREE.SpriteMaterial).map?.dispose();
       (sat.core.material as THREE.Material).dispose();
       (sat.halo.material as THREE.SpriteMaterial).map?.dispose();
@@ -571,10 +635,11 @@ function createGlobeView(
     sats.clear();
 
     tles.forEach((tle, index) => {
-      const sat = buildSatellite(tle, index);
+      const sat = buildSatellite(tle, index, observer);
       earthGroup.add(
         sat.pastLine,
         sat.futureLine,
+        sat.passLine,
         sat.core,
         sat.halo,
         ...sat.cometTrail,
@@ -714,6 +779,10 @@ function createGlobeView(
       .normalize();
   };
 
+  const setSimOffset = (offsetMs: number) => {
+    simOffsetMs = offsetMs;
+  };
+
   // User interaction (drag/zoom) hands control back — release the hook so
   // the globe can be freely rotated again.
   controls.addEventListener("start", () => {
@@ -780,17 +849,21 @@ function createGlobeView(
   const moonCometTargets = new Array<number>(MOON_COMET_TRAIL_COUNT);
   let frame = 0;
   let lastTelemetryAt = 0;
+  // Simulated-clock offset (ms), 0 = live. Everything in the loop that reads
+  // "now" (dots, tracks, moon, telemetry) uses wall time + this offset, so
+  // the scrubber can preview the sky hours ahead or behind in real time.
+  let simOffsetMs = 0;
   const animate = () => {
     frame = requestAnimationFrame(animate);
     const delta = clock.getDelta();
-    // The globe rotates at Earth's real sidereal rate — satellites orbit in
-    // inertial space, so the planet genuinely revolves beneath them. Starting
-    // from the GMST at load (see earthGroup init) keeps the map aligned with
-    // the real sky.
-    earthGroup.rotation.y += SIDEREAL_RATE * delta;
-
-    const nowMs = Date.now();
+    // The globe's orientation always matches the current (simulated) time:
+    // GMST at `nowMs`. All markers are ECEF (earth-fixed), so re-anchoring
+    // the rotation to GMST keeps continents under the right dots whether
+    // we're live or scrubbed hours into the future — the planet visibly
+    // revolves as the sim clock moves.
+    const nowMs = Date.now() + simOffsetMs;
     const now = new Date(nowMs);
+    earthGroup.rotation.y = gstime(now);
 
     for (const sat of sats.values()) {
       const point = currentGroundPoint(sat.tle.line1, sat.tle.line2, now);
@@ -911,6 +984,28 @@ function createGlobeView(
         for (const sprite of sat.cometTrail) {
           sprite.visible = false;
         }
+      }
+
+      // Visible-pass highlight: the lime arc over the future track where
+      // the satellite will actually be watchable (flags precomputed per
+      // track vertex at build time). Only the future side counts — the
+      // past has already flown. A pass is contiguous, so a single draw
+      // range covers it.
+      let passStart = -1;
+      let passEnd = -1;
+      for (let i = k; i < sat.times.length; i += 1) {
+        if (sat.watchable[i]) {
+          if (passStart === -1) {
+            passStart = i;
+          }
+          passEnd = i + 1;
+        }
+      }
+      if (passStart !== -1 && passEnd - passStart > 1) {
+        sat.passLine.visible = true;
+        sat.passGeometry.setDrawRange(passStart, passEnd - passStart);
+      } else {
+        sat.passLine.visible = false;
       }
     }
 
@@ -1168,6 +1263,7 @@ function createGlobeView(
     updateMoon,
     setSelected,
     centerOnObserver,
+    setSimOffset,
     dispose,
   };
 }
@@ -1189,6 +1285,10 @@ export function SatelliteGlobe({
   const [error, setError] = useState<string | null>(null);
   const [tles, setTles] = useState<TleEntry[]>([]);
   const [telemetry, setTelemetry] = useState<GlobeTelemetry | null>(null);
+  // Time scrubber: live (0) or preview at wall time + offset. The offset is
+  // pushed into the scene so dots/tracks/moon/telemetry all follow it.
+  const [simulating, setSimulating] = useState(false);
+  const [simOffsetMs, setSimOffsetMs] = useState(0);
   const idsKey = selectedIds.join(",");
   const { lat, lon } = location;
 
@@ -1314,6 +1414,26 @@ export function SatelliteGlobe({
     }
   }, [lat, lon]);
 
+  // Ticking wall clock for the scrubber label (mirrors the HUD's hook —
+  // render-pure, so the React compiler lint stays happy).
+  const [clockNow, setClockNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setClockNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Clock label under the scrubber: the previewed time + relative offset.
+  // Driven by the ticking state clock (not Date.now()) so renders stay pure.
+  const scrubClock = new Date(clockNow.getTime() + (simulating ? simOffsetMs : 0));
+  const scrubTimeLabel = (() => {
+    const time = scrubClock.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    return simulating ? `${time} · ${formatOffsetLabel(simOffsetMs)}` : time;
+  })();
+
   // Drop a focus that no longer exists in the refreshed set.
   useEffect(() => {
     if (
@@ -1329,6 +1449,11 @@ export function SatelliteGlobe({
     viewRef.current?.setSelected(focusedId);
   }, [focusedId]);
 
+  // Push the scrubber's simulated-clock offset into the scene (0 = live).
+  useEffect(() => {
+    viewRef.current?.setSimOffset(simulating ? simOffsetMs : 0);
+  }, [simulating, simOffsetMs]);
+
   return (
     <div className="glass glass-hover rounded-2xl p-6">
       <div className="mb-5 flex items-center gap-2.5">
@@ -1338,12 +1463,27 @@ export function SatelliteGlobe({
         <h3 className="text-sm font-semibold tracking-wide text-slate-200 uppercase">
           Live sky globe
         </h3>
-        <span className="ml-auto inline-flex items-center gap-1.5 text-[11px] font-medium text-emerald-300/90">
-          <span className="relative flex size-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-            <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
-          </span>
-          live
+        <span
+          className={`ml-auto inline-flex items-center gap-1.5 text-[11px] font-medium ${
+            simulating
+              ? "text-amber-300/90"
+              : "text-emerald-300/90"
+          }`}
+        >
+          {simulating ? (
+            <>
+              <span className="inline-flex size-2 rounded-full bg-amber-400" />
+              sim · {formatOffsetLabel(simOffsetMs)}
+            </>
+          ) : (
+            <>
+              <span className="relative flex size-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+                <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
+              </span>
+              live
+            </>
+          )}
         </span>
       </div>
 
@@ -1355,6 +1495,7 @@ export function SatelliteGlobe({
         onCenterOnYou={() => viewRef.current?.centerOnObserver()}
         location={{ lat, lon }}
         colors={COLORS}
+        simOffsetMs={simulating ? simOffsetMs : 0}
       >
         <div className="relative mx-auto w-full max-w-[480px] sm:max-w-3xl">
           <div
@@ -1382,6 +1523,52 @@ export function SatelliteGlobe({
               )}
             </div>
           )}
+
+          {/* Time scrubber — preview the sky at another moment. Dragging it
+              switches into simulation; the toggle jumps straight back live. */}
+          <div className="mt-3 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                if (simulating) {
+                  setSimulating(false);
+                  setSimOffsetMs(0);
+                } else {
+                  setSimulating(true);
+                }
+              }}
+              aria-pressed={!simulating}
+              className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold transition ${
+                simulating
+                  ? "border-amber-400/40 bg-amber-400/10 text-amber-300"
+                  : "border-emerald-400/40 bg-emerald-400/10 text-emerald-300"
+              }`}
+            >
+              <span
+                className={`size-1.5 rounded-full ${
+                  simulating ? "bg-amber-400" : "bg-emerald-400"
+                }`}
+              />
+              {simulating ? "Live" : "Scrub"}
+            </button>
+            <input
+              type="range"
+              min={-SCRUB_PAST_MS}
+              max={SCRUB_FUTURE_MS}
+              step={300_000}
+              value={simulating ? simOffsetMs : 0}
+              onChange={(event) => {
+                setSimulating(true);
+                setSimOffsetMs(Number(event.target.value));
+              }}
+              disabled={!simulating}
+              aria-label="Preview time"
+              className="min-w-0 flex-1 accent-cyan-400 disabled:opacity-40"
+            />
+            <span className="mono w-20 shrink-0 text-right text-[11px] text-slate-400">
+              {scrubTimeLabel}
+            </span>
+          </div>
         </div>
       </SatelliteGlobeHud>
 

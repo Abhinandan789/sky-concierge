@@ -35,19 +35,26 @@ interface SatelliteGlobeHudProps {
   children: React.ReactNode;
   /** Swing the camera to the observer's location ("You" legend row). */
   onCenterOnYou?: () => void;
+  /** Simulated-clock offset (ms) from the time scrubber; 0 = live. The
+   * clock display and next-pass countdown follow it. */
+  simOffsetMs?: number;
 }
 
 const PANEL =
   "pointer-events-auto rounded-xl border border-white/10 bg-slate-950/80 shadow-lg shadow-black/50 backdrop-blur-sm";
 const HEADER = "mb-2 text-[9px] font-bold uppercase tracking-[0.18em]";
 
-/** Live UTC clock, ticking every second. */
-function useUtcClock() {
-  const [now, setNow] = useState(() => new Date());
+/** Live UTC clock, ticking every second — plus an optional sim offset from
+ * the globe's time scrubber, so the HUD shows the previewed time. */
+function useUtcClock(offsetMs = 0) {
+  const [now, setNow] = useState(() => new Date(Date.now() + offsetMs));
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 1000);
+    const timer = setInterval(
+      () => setNow(new Date(Date.now() + offsetMs)),
+      1000,
+    );
     return () => clearInterval(timer);
-  }, []);
+  }, [offsetMs]);
   return now;
 }
 
@@ -226,6 +233,13 @@ function LegendPanel({ onCenterOnYou }: { onCenterOnYou?: () => void }) {
           </span>
         </li>
         <li className="flex items-center gap-2 px-1">
+          <span className="inline-block h-0.5 w-4 shrink-0 rounded-full bg-lime-400/80" />
+          <span className="text-[11px] text-slate-200">Visible pass</span>
+          <span className="ml-auto text-[9px] text-slate-500">
+            elevation + dark
+          </span>
+        </li>
+        <li className="flex items-center gap-2 px-1">
           <span className="inline-block size-2.5 shrink-0 rounded-full border-2 border-[#f1f5f9]" />
           <span className="text-[11px] text-slate-200">Moon</span>
           <span className="ml-auto text-[9px] text-slate-500">
@@ -269,6 +283,23 @@ function TelemetryPanel({
       <dl className="space-y-1.5">
         <div className="flex items-baseline justify-between gap-3">
           <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
+            Next pass
+          </dt>
+          <dd className="mono text-right text-[11px] font-semibold text-slate-100">
+            {nextPass ? (
+              <>
+                {formatTime(nextPass, "UTC")}
+                <span className="block text-[9px] font-normal text-slate-500">
+                  UTC · {formatUpcoming(nextPass, now)}
+                </span>
+              </>
+            ) : (
+              "—"
+            )}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
             Altitude
           </dt>
           <dd className="mono text-[11px] text-slate-100">
@@ -307,23 +338,6 @@ function TelemetryPanel({
             {selectedTelemetry
               ? formatCoordinates(selectedTelemetry.lat, selectedTelemetry.lon)
               : "—"}
-          </dd>
-        </div>
-        <div className="flex items-baseline justify-between gap-3">
-          <dt className="text-[9px] tracking-wider text-slate-500 uppercase">
-            Next pass
-          </dt>
-          <dd className="mono text-right text-[11px] text-slate-100">
-            {nextPass ? (
-              <>
-                {formatTime(nextPass, "UTC")}
-                <span className="block text-[9px] text-slate-500">
-                  UTC · {formatUpcoming(nextPass, now)}
-                </span>
-              </>
-            ) : (
-              "—"
-            )}
           </dd>
         </div>
       </dl>
@@ -405,17 +419,27 @@ export function SatelliteGlobeHud({
   colors,
   children,
   onCenterOnYou,
+  simOffsetMs = 0,
 }: SatelliteGlobeHudProps) {
-  const now = useUtcClock();
+  const now = useUtcClock(simOffsetMs);
   const { lat: observerLat, lon: observerLon } = location;
   const selectedTle = tles.find((tle) => tle.noradId === selectedId) ?? null;
   const selectedTelemetry = selectedId
     ? (telemetry?.sats[selectedId] ?? null)
     : null;
 
-  // Next pass for the selected satellite, recomputed when it changes or the
-  // TLEs refresh (~24 h scan, a few ms). The first run is deferred off the
-  // effect body (react-hooks/set-state-in-effect).
+  // Compass target: the selected satellite, else the first tracked one.
+  const compassId = selectedId ?? tles[0]?.noradId ?? null;
+  const compassTle =
+    tles.find((tle) => tle.noradId === compassId) ?? null;
+  const compassAzimuth =
+    (compassId ? telemetry?.sats[compassId]?.azimuthDeg : undefined) ?? 0;
+  const compassName = compassTle?.name ?? null;
+
+  // Next pass for the compass target (the selected satellite, else the
+  // first tracked one), recomputed when it changes or the TLEs refresh
+  // (~24 h scan, a few ms). The first run is deferred off the effect body
+  // (react-hooks/set-state-in-effect).
   const [nextPass, setNextPass] = useState<Date | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -425,7 +449,7 @@ export function SatelliteGlobeHud({
       }
     };
     const compute = () => {
-      if (!selectedTle) {
+      if (!compassTle) {
         apply(null);
         return;
       }
@@ -433,10 +457,12 @@ export function SatelliteGlobeHud({
         horizonDeg: 10,
         windowHours: 24,
         stepSeconds: 30,
+        // Search from the previewed time, not the wall clock.
+        now: new Date(Date.now() + simOffsetMs),
       };
       const passes = findSatellitePasses(
-        selectedTle.line1,
-        selectedTle.line2,
+        compassTle.line1,
+        compassTle.line2,
         { lat: observerLat, lon: observerLon },
         options,
       );
@@ -449,7 +475,24 @@ export function SatelliteGlobeHud({
       clearInterval(timer);
       window.clearTimeout(initial);
     };
-  }, [selectedTle, observerLat, observerLon]);
+  }, [compassTle, observerLat, observerLon, simOffsetMs]);
+
+  // "Visible soon" — a transient nudge next to the compass when the next
+  // pass starts within the next 10 minutes (reuses the same computed pass).
+  const minutesToNextPass =
+    nextPass === null ? null : (nextPass.getTime() - now.getTime()) / 60_000;
+  const passImminent =
+    minutesToNextPass !== null && minutesToNextPass > 0 && minutesToNextPass <= 10;
+  const passBanner = passImminent ? (
+    <div className={`${PANEL} px-3 py-2 text-center`}>
+      <p className="text-[11px] leading-tight font-semibold text-lime-300">
+        {compassName} visible in {Math.round(minutesToNextPass as number)} min
+      </p>
+      <p className="mt-0.5 text-[10px] text-slate-400">
+        look {formatCompass(compassAzimuth)} · {Math.round(compassAzimuth)}°
+      </p>
+    </div>
+  ) : null;
 
   const inViewCount = useMemo(
     () =>
@@ -457,13 +500,6 @@ export function SatelliteGlobeHud({
         .length,
     [telemetry],
   );
-
-  // Compass target: the selected satellite, else the first tracked one.
-  const compassId = selectedId ?? tles[0]?.noradId ?? null;
-  const compassAzimuth =
-    (compassId ? telemetry?.sats[compassId]?.azimuthDeg : undefined) ?? 0;
-  const compassName =
-    tles.find((tle) => tle.noradId === compassId)?.name ?? null;
 
   const utcTime = now.toLocaleTimeString([], {
     hour: "2-digit",
@@ -534,7 +570,10 @@ export function SatelliteGlobeHud({
           {trackingPanel}
           {legendPanel}
         </div>
-        <div className="flex justify-center">{compassPanel}</div>
+        <div className="flex flex-col items-center gap-2">
+          {passBanner}
+          {compassPanel}
+        </div>
       </div>
 
       {/* Left edge — satellites + tracking + legend (desktop, unchanged) */}
@@ -555,6 +594,7 @@ export function SatelliteGlobeHud({
       {/* Right edge — detail + compass (desktop, unchanged) */}
       <div className="pointer-events-none absolute top-0 right-0 z-10 hidden max-h-full w-44 max-w-[38%] flex-col items-end gap-2.5 md:flex">
         {telemetryPanel}
+        {passBanner}
         {compassPanel}
       </div>
     </div>
