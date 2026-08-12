@@ -1572,19 +1572,23 @@ export function SatelliteGlobe({
         </div>
       </SatelliteGlobeHud>
 
-      <p className="mx-auto mt-5 hidden max-w-md text-center text-[11px] leading-relaxed text-slate-500 sm:block">
-        The globe spins at Earth&apos;s real rate — satellites orbit in fixed
-        space, so you see the planet revolve beneath them. The pulsing dots are
-        the satellites&apos; live positions around{" "}
+      <p className="mt-5 hidden text-[11px] leading-relaxed text-slate-500 sm:block">
+        The pulsing dots are the satellites&apos; live positions around{" "}
         <span className="text-slate-300">{formatCoordinates(lat, lon)}</span>;
-        the teal dot is you, and the white ring marks the Moon&apos;s sub-point
-        — a faint light sweeps westward along its path. Each colored line is
-        one satellite&apos;s ground track — dim behind the dot (already flown),
-        bright ahead (where it&apos;s headed) — and a soft light sweeps forward
-        along the track, showing the satellite&apos;s direction of travel.{" "}
+        the teal dot is you, and the white ring marks the Moon&apos;s sub-point.
+        Each colored line is one satellite&apos;s ground track — dim behind the
+        dot (already flown), bright ahead (where it&apos;s headed) — with a soft
+        light sweeping forward to show the direction of travel, and the Moon&apos;s
+        path sweeping westward.{" "}
+        <span className="text-lime-300">
+          A lime arc marks where the satellite will actually be visible from
+          here — above the horizon and dark enough to see.
+        </span>{" "}
+        Use <span className="text-slate-300">Scrub</span> to preview the sky at
+        another moment, or{" "}
         <span className="text-slate-400">
-          Click a satellite (or its name in the list) to rotate the view and
-          lock onto its dot — drag the globe to release it.
+          click a satellite to rotate the view and lock onto its dot — drag the
+          globe to release it.
         </span>
       </p>
     </div>
