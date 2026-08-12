@@ -133,12 +133,13 @@ pnpm check:alerts --digest   # weekly highlights email, deduped per ISO week
 
 ### Scheduled alert checks (cron)
 
-`vercel.json` wires Vercel Cron to hit `GET /api/cron/alerts` every 5 minutes
-(the route calls the same `runAlertCheck()` engine as `pnpm check:alerts`, and
-`?digest=1` runs the weekly digest — its ISO-week dedup means it only ever
-sends once per week). Set `CRON_SECRET` in your deployment and Vercel sends it
-as `Authorization: Bearer` on every invocation; the route also accepts
-`?secret=` for manual runs:
+`vercel.json` wires Vercel Cron to hit `GET /api/cron/alerts` once a day at
+18:00 UTC (Vercel Hobby accounts are limited to daily crons — a `*/5 * * * *`
+schedule fails the deploy). The route calls the same `runAlertCheck()` engine
+as `pnpm check:alerts`, and `?digest=1` runs the weekly digest — its ISO-week
+dedup means it only ever sends once per week. Set `CRON_SECRET` in your
+deployment and Vercel sends it as `Authorization: Bearer` on every invocation;
+the route also accepts `?secret=` for manual runs:
 
 ```bash
 curl "http://localhost:3000/api/cron/alerts?secret=…"

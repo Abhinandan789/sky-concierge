@@ -11,6 +11,7 @@ import {
   type GroundTrackPoint,
 } from "@/lib/satellite-map";
 import { gstime } from "satellite.js";
+import * as SunCalc from "suncalc";
 import type { LatLon } from "@/types";
 import type { MoonTrack, MoonTrackPoint } from "@/services/sky/moon-track";
 import * as THREE from "three";
@@ -89,6 +90,15 @@ const COMET_SPEED_DEG_S = 0.8;
 const COMET_HEAD_OPACITY = 0.5;
 /** Arc (degrees) over which the comet fades in after respawning. */
 const COMET_SPAWN_FADE_DEG = 2.5;
+
+/** Visible-pass highlight — a lime arc over the future track where the
+ * satellite will actually be watchable from the observer's location
+ * (above the horizon AND dark enough at the observer to see it). */
+const PASS_HIGHLIGHT_COLOR = "#a3e635";
+/** Minimum elevation (deg) for a pass to count as visible. */
+const PASS_HORIZON_DEG = 10;
+/** Sun altitude (deg) below which the observer's sky counts as dark. */
+const PASS_SUN_DARK_DEG = 0;
 
 /** Time-scrubber window: preview between 3 h in the past and 6 h ahead. */
 const SCRUB_PAST_MS = 3 * 3600_000;
@@ -368,17 +378,42 @@ interface GlobeSatellite {
   cometTrail: THREE.Sprite[];
   /** Distance the comet head has traveled ahead of the dot (radians). */
   cometDist: number;
+  /** Per-track-vertex flag: watchable from the observer (elevation above
+   * the horizon AND dark enough) — precomputed at build time, since vertex
+   * timestamps are fixed the flags stay correct even when scrubbed. */
+  watchable: boolean[];
+  /** Lime overlay line over the watchable segment of the future track. */
+  passGeometry: THREE.BufferGeometry;
+  passLine: THREE.Line;
 }
 
 /** Build a satellite's scene objects from its TLE. */
-function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
+function buildSatellite(
+  tle: TleEntry,
+  index: number,
+  observer: LatLon,
+): GlobeSatellite {
   const color = COLORS[index % COLORS.length];
   const track = computeGroundTrack(tle.line1, tle.line2);
   const times = track.map((point) => point.time);
-  const makeGeometry = () => {
+  // Watchability per track vertex: the pass must clear the observer's
+  // horizon AND the observer's sky must be dark enough to see it. Each
+  // vertex is evaluated at its own timestamp, so the flags stay valid
+  // no matter where the sim-clock split sits.
+  const watchable = track.map((point) => {
+    const date = new Date(point.time);
+    const look = observerLookAngles(tle.line1, tle.line2, observer, date);
+    if (!look || look.elevationDeg < PASS_HORIZON_DEG) {
+      return false;
+    }
+    // suncalc 2.x returns altitude in degrees.
+    const sun = SunCalc.getPosition(date, observer.lat, observer.lon);
+    return sun.altitude < PASS_SUN_DARK_DEG;
+  });
+  const makeGeometry = (liftKm = TRACK_LIFT_KM) => {
     const positions = new Float32Array(track.length * 3);
     track.forEach((point: GroundTrackPoint, i: number) => {
-      const v = latLonAltToVector3(point.lat, point.lon, TRACK_LIFT_KM);
+      const v = latLonAltToVector3(point.lat, point.lon, liftKm);
       positions[i * 3] = v.x;
       positions[i * 3 + 1] = v.y;
       positions[i * 3 + 2] = v.z;
@@ -389,6 +424,9 @@ function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
   };
   const pastGeometry = makeGeometry();
   const futureGeometry = makeGeometry();
+  // The highlight sits 1 km above the track so it never z-fights the line
+  // it's overlaying (imperceptible at globe scale).
+  const passGeometry = makeGeometry(TRACK_LIFT_KM + 1);
   const pastLine = new THREE.Line(
     pastGeometry,
     new THREE.LineBasicMaterial({
@@ -403,6 +441,14 @@ function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
       color,
       transparent: true,
       opacity: TRACK_FUTURE_OPACITY,
+    }),
+  );
+  const passLine = new THREE.Line(
+    passGeometry,
+    new THREE.LineBasicMaterial({
+      color: PASS_HIGHLIGHT_COLOR,
+      transparent: true,
+      opacity: 0.85,
     }),
   );
 
@@ -431,6 +477,9 @@ function buildSatellite(tle: TleEntry, index: number): GlobeSatellite {
     halo,
     cometTrail,
     cometDist: 0,
+    watchable,
+    passGeometry,
+    passLine,
   };
 }
 
@@ -576,14 +625,17 @@ function createGlobeView(
       earthGroup.remove(
         sat.pastLine,
         sat.futureLine,
+        sat.passLine,
         sat.core,
         sat.halo,
         ...sat.cometTrail,
       );
       sat.pastGeometry.dispose();
       sat.futureGeometry.dispose();
+      sat.passGeometry.dispose();
       (sat.pastLine.material as THREE.Material).dispose();
       (sat.futureLine.material as THREE.Material).dispose();
+      (sat.passLine.material as THREE.Material).dispose();
       (sat.core.material as THREE.SpriteMaterial).map?.dispose();
       (sat.core.material as THREE.Material).dispose();
       (sat.halo.material as THREE.SpriteMaterial).map?.dispose();
@@ -596,10 +648,11 @@ function createGlobeView(
     sats.clear();
 
     tles.forEach((tle, index) => {
-      const sat = buildSatellite(tle, index);
+      const sat = buildSatellite(tle, index, observer);
       earthGroup.add(
         sat.pastLine,
         sat.futureLine,
+        sat.passLine,
         sat.core,
         sat.halo,
         ...sat.cometTrail,
@@ -944,6 +997,28 @@ function createGlobeView(
         for (const sprite of sat.cometTrail) {
           sprite.visible = false;
         }
+      }
+
+      // Visible-pass highlight: the lime arc over the future track where
+      // the satellite will actually be watchable (flags precomputed per
+      // track vertex at build time). Only the future side counts — the
+      // past has already flown. A pass is contiguous, so a single draw
+      // range covers it.
+      let passStart = -1;
+      let passEnd = -1;
+      for (let i = k; i < sat.times.length; i += 1) {
+        if (sat.watchable[i]) {
+          if (passStart === -1) {
+            passStart = i;
+          }
+          passEnd = i + 1;
+        }
+      }
+      if (passStart !== -1 && passEnd - passStart > 1) {
+        sat.passLine.visible = true;
+        sat.passGeometry.setDrawRange(passStart, passEnd - passStart);
+      } else {
+        sat.passLine.visible = false;
       }
     }
 
@@ -1352,10 +1427,19 @@ export function SatelliteGlobe({
     }
   }, [lat, lon]);
 
+  // Ticking wall clock for the scrubber label (mirrors the HUD's hook —
+  // render-pure, so the React compiler lint stays happy).
+  const [clockNow, setClockNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setClockNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   // Clock label under the scrubber: the previewed time + relative offset.
+  // Driven by the ticking state clock (not Date.now()) so renders stay pure.
+  const scrubClock = new Date(clockNow.getTime() + (simulating ? simOffsetMs : 0));
   const scrubTimeLabel = (() => {
-    const preview = new Date(Date.now() + (simulating ? simOffsetMs : 0));
-    const time = preview.toLocaleTimeString([], {
+    const time = scrubClock.toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
