@@ -21,6 +21,14 @@ export function locationToUrl(lat: number, lon: number): string {
  */
 export function RememberedLocation() {
   useEffect(() => {
+    // Only the home page consumes the remembered location. Email links (the
+    // /verify and /unsubscribe pages) must never be redirected away — a saved
+    // location would otherwise yank the visitor off their confirmation link
+    // before its token is ever applied.
+    if (window.location.pathname !== "/") {
+      return;
+    }
+
     // A just-completed auto-locate reloaded the page — tell the visitor their
     // exact coordinates are now in use.
     if (sessionStorage.getItem(JUST_LOCATED_KEY)) {
