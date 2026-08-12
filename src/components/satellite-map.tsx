@@ -11,6 +11,7 @@ import {
   horizonRadiusKm,
   splitTrackAt,
   toLocalKm,
+  watchableTrack,
   type GroundTrackPoint,
 } from "@/lib/satellite-map";
 import type { LatLon } from "@/types";
@@ -35,9 +36,91 @@ interface SatelliteMapProps {
 const COLORS = ["#22d3ee", "#fbbf24", "#e879f9", "#34d399"];
 /** Moon overlay color — neutral white, distinct from the satellite dots. */
 const MOON_COLOR = "#f1f5f9";
+/** Visible-pass arc color — matches the 3D globe's lime highlight. */
+const WATCHABLE_COLOR = "#a3e635";
 const LOGICAL_SIZE = 480;
 const PAD = 36;
 const TRACK_REFRESH_MS = 60_000;
+
+/* Radar direction sweep — the 2D counterpart of the globe's one-way comet. */
+const SWEEP_CYCLE_MS = 12_000;
+/** How far the head travels ahead of the dot before looping (logical px). */
+const SWEEP_ARC_PX = 52;
+/** Head + trailing embers along the track behind the head. */
+const SWEEP_EMBERS = 5;
+/** Head-to-tail pixel length of the sweep. */
+const SWEEP_TRAIL_PX = 36;
+const SWEEP_HEAD_RADIUS = 5;
+const SWEEP_TAIL_RADIUS = 2.5;
+/** Distance (px) over which the sweep fades in after looping. */
+const SWEEP_SPAWN_FADE_PX = 10;
+
+/**
+ * Draw a one-way direction sweep along a future-track polyline: a bright
+ * head with a fading trail that pushes forward and loops on a slow cycle
+ * (time-modulo, so the pure draw function stays stateless). Mirrors the
+ * globe's direction comet — the light only ever moves in the direction of
+ * travel.
+ */
+function drawDirectionSweep(
+  ctx: CanvasRenderingContext2D,
+  origin: { x: number; y: number },
+  futurePts: { x: number; y: number }[],
+  color: string,
+  nowMs: number,
+) {
+  if (futurePts.length === 0) {
+    return;
+  }
+  // Pixel distance of each polyline vertex from `origin` (dists[0] = origin).
+  const dists: number[] = [0];
+  let total = 0;
+  let prev = origin;
+  for (const point of futurePts) {
+    total += Math.hypot(point.x - prev.x, point.y - prev.y);
+    dists.push(total);
+    prev = point;
+  }
+  const cycle = (nowMs % SWEEP_CYCLE_MS) / SWEEP_CYCLE_MS;
+  const headDist = cycle * SWEEP_ARC_PX;
+  // Fade in after looping so the respawn isn't a hard pop.
+  const spawnFade = Math.min(1, headDist / SWEEP_SPAWN_FADE_PX);
+  const pointAt = (d: number) => {
+    if (d <= 0) {
+      return origin;
+    }
+    if (d >= total) {
+      return futurePts[futurePts.length - 1];
+    }
+    for (let i = 1; i < dists.length; i += 1) {
+      if (dists[i] >= d) {
+        const seg = dists[i] - dists[i - 1];
+        const t = seg > 0 ? (d - dists[i - 1]) / seg : 0;
+        const a = i === 1 ? origin : futurePts[i - 2];
+        const b = futurePts[i - 1];
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+      }
+    }
+    return futurePts[futurePts.length - 1];
+  };
+  const step = SWEEP_TRAIL_PX / (SWEEP_EMBERS - 1);
+  for (let i = 0; i < SWEEP_EMBERS; i += 1) {
+    const d = Math.max(0, headDist - i * step);
+    const p = pointAt(d);
+    const trail = i / (SWEEP_EMBERS - 1);
+    const radius =
+      SWEEP_HEAD_RADIUS + (SWEEP_TAIL_RADIUS - SWEEP_HEAD_RADIUS) * trail;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = spawnFade * (1 - trail) * 0.8;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 2 + 10 * (1 - trail);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
+}
 
 function drawRadar(
   canvas: HTMLCanvasElement,
@@ -45,6 +128,8 @@ function drawRadar(
     location: LatLon;
     tles: TleEntry[];
     tracks: Map<string, GroundTrackPoint[]>;
+    /** Per-vertex watchability flags (index-aligned with `tracks`). */
+    watchable: Map<string, boolean[]>;
     moon: MoonTrack | null;
     now: Date;
     /** Average cloud cover tonight (0-100), used to haze the disc. */
@@ -53,7 +138,7 @@ function drawRadar(
     focusedId: string | null;
   },
 ) {
-  const { location, tles, tracks, moon, now, cloudAverage, focusedId } =
+  const { location, tles, tracks, watchable, moon, now, cloudAverage, focusedId } =
     options;
   const dpr = window.devicePixelRatio || 1;
   const size = LOGICAL_SIZE;
@@ -165,6 +250,17 @@ function drawRadar(
 
     const { eastKm, northKm } = toLocalKm(moon.now.lat, moon.now.lon, location);
     const { x, y } = toCanvas(eastKm, northKm);
+    // One-way direction sweep along the Moon's future path — mirrors the
+    // globe's moon comet, so the westward drift reads at a glance.
+    const moonFuturePts = [current, ...moonFuture].map((point) => {
+      const { eastKm: e, northKm: n } = toLocalKm(
+        point.lat,
+        point.lon,
+        location,
+      );
+      return toCanvas(e, n);
+    });
+    drawDirectionSweep(ctx, { x, y }, moonFuturePts, MOON_COLOR, nowMs);
     // Ring marker — a hollow circle so it reads as "the Moon", not a satellite.
     ctx.beginPath();
     ctx.arc(x, y, 6, 0, Math.PI * 2);
@@ -213,8 +309,8 @@ function drawRadar(
       ctx.stroke();
       ctx.globalAlpha = 1;
     };
-    drawTrack(past, 0.3);
-    drawTrack(future, 0.9);
+    drawTrack(past, 0.25);
+    drawTrack(future, 0.8);
 
     const current = currentGroundPoint(tle.line1, tle.line2, now);
     if (!current) {
@@ -222,6 +318,72 @@ function drawRadar(
     }
     const { eastKm, northKm } = toLocalKm(current.lat, current.lon, location);
     const { x, y } = toCanvas(eastKm, northKm);
+
+    // One-way direction sweep along the future track (mirrors the globe's
+    // comet): a bright head with a fading trail pushing forward.
+    if (future.length > 0) {
+      const futurePts = future.map((point) => {
+        const { eastKm: e, northKm: n } = toLocalKm(
+          point.lat,
+          point.lon,
+          location,
+        );
+        return toCanvas(e, n);
+      });
+      drawDirectionSweep(ctx, { x, y }, futurePts, color, nowMs);
+    }
+
+    // Visible-pass arc: a lime line over the future track where the
+    // satellite will actually be watchable (above the horizon AND dark
+    // enough) — same logic as the 3D globe's highlight. Only the future
+    // side counts; passes are contiguous, so each run is one stroke.
+    const flags = watchable.get(tle.noradId) ?? [];
+    const splitIndex = track.findIndex((point) => point.time > nowMs);
+    const trackSplit = splitIndex === -1 ? track.length : splitIndex;
+    const drawWatchableRun = (start: number, end: number) => {
+      if (end - start < 2) {
+        return;
+      }
+      ctx.beginPath();
+      let started = false;
+      for (let i = start; i < end; i += 1) {
+        const point = track[i];
+        const { eastKm: e, northKm: n } = toLocalKm(
+          point.lat,
+          point.lon,
+          location,
+        );
+        const { x: px, y: py } = toCanvas(e, n);
+        if (!started) {
+          ctx.moveTo(px, py);
+          started = true;
+        } else {
+          ctx.lineTo(px, py);
+        }
+      }
+      ctx.globalAlpha = 0.9;
+      ctx.strokeStyle = WATCHABLE_COLOR;
+      ctx.lineWidth = 2;
+      ctx.shadowColor = WATCHABLE_COLOR;
+      ctx.shadowBlur = 6;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.shadowBlur = 0;
+    };
+    let runStart = -1;
+    for (let i = trackSplit; i < track.length; i += 1) {
+      if (flags[i]) {
+        if (runStart === -1) {
+          runStart = i;
+        }
+      } else if (runStart !== -1) {
+        drawWatchableRun(runStart, i);
+        runStart = -1;
+      }
+    }
+    if (runStart !== -1) {
+      drawWatchableRun(runStart, track.length);
+    }
 
     // Blip with glow + halo
     ctx.beginPath();
@@ -314,6 +476,7 @@ export function SatelliteMap({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const tlesRef = useRef<TleEntry[]>([]);
   const tracksRef = useRef<Map<string, GroundTrackPoint[]>>(new Map());
+  const watchableRef = useRef<Map<string, boolean[]>>(new Map());
   const [tles, setTles] = useState<TleEntry[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">(
     "loading",
@@ -372,6 +535,21 @@ export function SatelliteMap({
       clearInterval(timer);
     };
   }, [idsKey]);
+
+  // Watchability flags per track vertex — depend on the observer AND the
+  // loaded TLE set (the fetch is async, so `tles` state is the trigger: it
+  // flips only after tracksRef is populated).
+  useEffect(() => {
+    const map = new Map<string, boolean[]>();
+    for (const tle of tles) {
+      const track = tracksRef.current.get(tle.noradId) ?? [];
+      map.set(
+        tle.noradId,
+        watchableTrack(tle.line1, tle.line2, { lat, lon }, track),
+      );
+    }
+    watchableRef.current = map;
+  }, [lat, lon, tles]);
 
   // Cloud-cover summary for the haze + badge (server-side TTL cached).
   useEffect(() => {
@@ -434,6 +612,7 @@ export function SatelliteMap({
           location: { lat, lon },
           tles: tlesRef.current,
           tracks: tracksRef.current,
+          watchable: watchableRef.current,
           moon: moonRef.current,
           now: new Date(),
           cloudAverage: cloudAverageRef.current,
@@ -573,8 +752,11 @@ export function SatelliteMap({
             <span className="text-slate-300">
               {formatCoordinates(location.lat, location.lon)}
             </span>{" "}
-            — past 30 min (dim) and the next 90 min (bright). Positions update
-            live; the dashed ring is the horizon for a ~400 km orbit.
+            — past 30 min (dim) and the next 90 min (bright), with a light
+            sweeping forward to show the direction of travel. The lime arc
+            marks where a satellite will actually be visible from here
+            (above the horizon and dark enough). Positions update live; the
+            dashed ring is the horizon for a ~400 km orbit.
           </p>
           <ul className="space-y-1.5">
             {tles.map((tle, index) => (

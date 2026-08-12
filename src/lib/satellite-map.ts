@@ -1,4 +1,5 @@
 import * as satellite from "satellite.js";
+import * as SunCalc from "suncalc";
 import type { LatLon } from "@/types";
 
 /**
@@ -29,6 +30,43 @@ export const KM_PER_DEG_LAT = 111.32;
 
 /** Radar display radius in km — tracks beyond this clamp to the edge. */
 export const RADAR_RADIUS_KM = 3000;
+
+/** Minimum elevation (deg) for a pass to count as visible from an observer. */
+export const WATCHABLE_HORIZON_DEG = 10;
+/** Sun altitude (deg) below which the observer's sky counts as dark. */
+export const WATCHABLE_SUN_DARK_DEG = 0;
+
+/**
+ * Is a satellite watchable from `observer` at `date`? Two conditions: it
+ * clears the observer's horizon (elevation ≥ WATCHABLE_HORIZON_DEG) AND the
+ * observer's sky is dark enough to see it (sun below the horizon — suncalc
+ * 2.x returns altitude in degrees).
+ */
+export function isWatchableAt(
+  line1: string,
+  line2: string,
+  observer: LatLon,
+  date: Date,
+): boolean {
+  const look = observerLookAngles(line1, line2, observer, date);
+  if (!look || look.elevationDeg < WATCHABLE_HORIZON_DEG) {
+    return false;
+  }
+  const sun = SunCalc.getPosition(date, observer.lat, observer.lon);
+  return sun.altitude < WATCHABLE_SUN_DARK_DEG;
+}
+
+/** Per-vertex watchability flags for a ground track (index-aligned). */
+export function watchableTrack(
+  line1: string,
+  line2: string,
+  observer: LatLon,
+  track: GroundTrackPoint[],
+): boolean[] {
+  return track.map((point) =>
+    isWatchableAt(line1, line2, observer, new Date(point.time)),
+  );
+}
 
 /** Ground-track window drawn on the radar. */
 export const TRACK_PAST_MINUTES = 30;

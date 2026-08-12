@@ -46,6 +46,18 @@ export interface PushSubscriptionRow {
   createdAt: string;
 }
 
+export interface EmailEventRow {
+  id: string;
+  email: string;
+  eventType: string;
+  emailId: string | null;
+  detail: string;
+  createdAt: string;
+}
+
+/** Delivery state of an email subscription, updated by the Resend webhook. */
+export type EmailStatus = "ok" | "delivered" | "bounced" | "complained";
+
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS alert_subscriptions (
   id                    TEXT PRIMARY KEY,
@@ -98,6 +110,19 @@ CREATE TABLE IF NOT EXISTS push_logs (
   FOREIGN KEY (subscription_id) REFERENCES push_subscriptions(id) ON DELETE CASCADE,
   UNIQUE(subscription_id, event_type, date_key)
 );
+
+-- Append-only log of Resend delivery events (sent / delivered / bounced /
+-- complained), keyed by the email address so it survives subscription moves.
+CREATE TABLE IF NOT EXISTS email_events (
+  id         TEXT PRIMARY KEY,
+  email      TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  email_id   TEXT,
+  detail     TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_events_email ON email_events(email, created_at);
 `;
 
 /**
@@ -167,6 +192,25 @@ export function createSkyDb(path: string): DatabaseSync {
   );
   ensureColumn(db, "alert_subscriptions", "pending_lat", "pending_lat REAL");
   ensureColumn(db, "alert_subscriptions", "pending_lon", "pending_lon REAL");
+  ensureColumn(
+    db,
+    "alert_subscriptions",
+    "email_status",
+    "email_status TEXT NOT NULL DEFAULT 'ok'",
+  );
+  ensureColumn(db, "alert_subscriptions", "bounced_at", "bounced_at TEXT");
+  ensureColumn(
+    db,
+    "alert_subscriptions",
+    "last_email_event",
+    "last_email_event TEXT",
+  );
+  ensureColumn(
+    db,
+    "alert_subscriptions",
+    "last_email_event_at",
+    "last_email_event_at TEXT",
+  );
 
   // Existing subscribers predate double opt-in; treat them as verified and
   // give them unsubscribe tokens so links work immediately.
@@ -520,6 +564,107 @@ export function removeAlertLog(
     `DELETE FROM alert_logs
      WHERE subscription_id = ? AND event_type = ? AND date_key = ?`,
   ).run(input.subscriptionId, input.eventType, input.dateKey);
+}
+
+// ─── Email delivery tracking (Resend webhook) ──────────────────────────────
+
+export interface EmailWebhookInput {
+  /** Recipient address the event is about. */
+  email: string;
+  /** Resend event type, e.g. "email.delivered" / "email.bounced". */
+  eventType: string;
+  emailId?: string | null;
+  /** Resend bounce_type ("Permanent" / "Transient" / "Undetermined"). */
+  bounceType?: string | null;
+  /** Short human-readable detail stored on the event log. */
+  detail?: string;
+}
+
+/**
+ * Record a Resend delivery event and reflect it on the matching subscription
+ * (matched by the recipient's email — the address is the stable key across
+ * subscription moves). Bounces/complaints mark the row as failed: the status
+ * flips to "bounced"/"complained", `bounced_at` is stamped, and the
+ * subscription is disabled so the alert engine stops emailing a dead address.
+ * Transient bounces stay enabled (Resend retries those on its own).
+ *
+ * Returns the affected subscription id, or null when no subscription uses the
+ * address (e.g. a verification email for a signup that was never completed).
+ */
+export function applyEmailWebhookEvent(
+  db: DatabaseSync,
+  input: EmailWebhookInput,
+): string | null {
+  db.prepare(
+    `INSERT INTO email_events (id, email, event_type, email_id, detail)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    randomUUID(),
+    input.email,
+    input.eventType,
+    input.emailId ?? null,
+    input.detail ?? "",
+  );
+
+  const now = new Date().toISOString();
+  const failed =
+    input.eventType === "email.bounced" ||
+    input.eventType === "email.complained";
+  // Permanent (and undetermined) bounces kill the address; transient ones are
+  // usually full mailboxes Resend keeps retrying, so leave the sub enabled.
+  const permanent =
+    input.eventType === "email.complained" ||
+    (input.eventType === "email.bounced" && input.bounceType !== "Transient");
+
+  const status: EmailStatus =
+    input.eventType === "email.bounced"
+      ? "bounced"
+      : input.eventType === "email.complained"
+        ? "complained"
+        : "delivered";
+
+  const result = db
+    .prepare(
+      `UPDATE alert_subscriptions
+       SET email_status = ?,
+           last_email_event = ?,
+           last_email_event_at = ?,
+           bounced_at = CASE WHEN ? THEN COALESCE(bounced_at, ?) ELSE bounced_at END,
+           enabled = CASE WHEN ? THEN 0 ELSE enabled END
+       WHERE email = ? AND enabled = 1`,
+    )
+    .run(
+      status,
+      input.eventType,
+      now,
+      failed ? 1 : 0,
+      now,
+      permanent ? 1 : 0,
+      input.email,
+    );
+
+  if (result.changes === 0) {
+    return null;
+  }
+  const row = db
+    .prepare(`SELECT id FROM alert_subscriptions WHERE email = ?`)
+    .get(input.email) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
+/** Latest delivery events for an address (webhook debugging / admin). */
+export function listEmailEvents(
+  db: DatabaseSync,
+  email: string,
+  limit = 50,
+): EmailEventRow[] {
+  return db
+    .prepare(
+      `SELECT id, email, event_type AS eventType, email_id AS emailId,
+              detail, created_at AS createdAt
+       FROM email_events WHERE email = ? ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(email, limit) as unknown as EmailEventRow[];
 }
 
 // ─── Push subscriptions ────────────────────────────────────────────────────
