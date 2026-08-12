@@ -106,16 +106,28 @@ demo). Open the app, hit **Use my location**, and scroll to _Tonight's Brief_.
 
 ### Real email alerts
 
+Two providers are supported. **Brevo is the no-domain option** (free, 300
+emails/day):
+
 ```bash
 cp .env.example .env.local
-# set RESEND_API_KEY (https://resend.com/api-keys) — from "Sky Concierge
-# <onboarding@resend.dev>" works for testing
+# 1. Sign up at https://brevo.com → Settings → Senders, Domains, IPs → Senders
+#    → Add a sender → verify any email address you own (no domain needed)
+# 2. Settings → API Keys → generate a key, then in .env.local set:
+#    BREVO_API_KEY="xkeysib-..."
+#    BREVO_FROM="Sky Concierge <you@gmail.com>"  # the verified address
 pnpm check:alerts     # emails due alerts; console fallback without a key
 ```
 
-When `RESEND_API_KEY` is set, new signups must confirm their email first (the
-confirmation link is emailed to them). Without a key, signups are active
-immediately and alerts print to the console.
+Alternatively, **Resend** (`RESEND_API_KEY` from https://resend.com/api-keys):
+note the free test sender `onboarding@resend.dev` can only deliver to *your own
+account email* — sending to other recipients requires a verified domain
+(resend.com/domains) and a matching `RESEND_FROM`.
+
+When an email sender key (`BREVO_API_KEY` or `RESEND_API_KEY`) is set, new
+signups must confirm their email first (the confirmation link is emailed to
+them). Without a key, signups are active immediately and alerts print to the
+console.
 
 ### Push notifications
 
