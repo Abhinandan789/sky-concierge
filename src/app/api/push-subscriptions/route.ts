@@ -88,7 +88,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const id = upsertPushSubscription(getDb(), {
+    const id = await upsertPushSubscription(await getDb(), {
       endpoint,
       p256dh,
       auth,
@@ -123,6 +123,6 @@ export async function DELETE(request: NextRequest) {
     return jsonError("An endpoint is required.", 400, "MISSING_ENDPOINT");
   }
 
-  const found = disablePushSubscription(getDb(), endpoint);
+  const found = await disablePushSubscription(await getDb(), endpoint);
   return jsonOk({ unsubscribed: true, found });
 }

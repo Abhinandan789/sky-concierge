@@ -56,7 +56,7 @@ map, it's a lightweight "sky concierge" that tells you _when to look up_.
 - **Location-aware** — "Use my location" button, `?lat=&lon=` in the URL, and
   your last location is remembered between visits.
 - **Alert subscriptions** — pick events + email + satellites, stored in
-  SQLite:
+  Postgres (SQLite-compatible SQL, hosted or in-memory):
   - **Per-subscriber satellites**: choose which NORAD ids to be alerted
     about (pre-filled from the tracker picker); pass alerts are computed
     for exactly that set.
@@ -79,9 +79,12 @@ map, it's a lightweight "sky concierge" that tells you _when to look up_.
 ## Tech stack
 
 - **Next.js 16** (App Router) + **TypeScript** (strict) + **Tailwind CSS v4**
-- **SQLite via `node:sqlite`** — zero database dependencies, no migrations CLI,
-  no env vars. The schema is idempotent (`CREATE TABLE IF NOT EXISTS` plus
-  column additions for pre-existing databases).
+- **Postgres** — persistent and serverless-friendly. Production reads
+  `DATABASE_URL` (e.g. a free Neon database via one-click Vercel integration);
+  when it's unset the app runs on an in-memory Postgres (PGlite) so local dev
+  and tests need zero setup. The schema is idempotent (`CREATE TABLE IF NOT
+  EXISTS` plus `ADD COLUMN IF NOT EXISTS` for pre-existing databases) — no
+  migrations CLI.
 - **satellite.js** (SGP4 propagation), **SunCalc** (moon/sun), **tz-lookup**
   (location timezones), **astronomy-engine** (planets & conjunctions),
   **three.js** (3D globe), **web-push** (Web Push / VAPID), **CelesTrak**
@@ -97,9 +100,9 @@ pnpm install
 pnpm dev        # http://localhost:3000 (3001 if 3000 is busy)
 ```
 
-No database setup step — the SQLite file (`data/sky.db`) is created
-automatically on first use. Open the app, hit **Use my location**, and scroll
-to _Tonight's Brief_.
+No database setup step for local dev — with `DATABASE_URL` unset the app runs
+on an ephemeral in-memory Postgres (data resets on restart; that's fine for a
+demo). Open the app, hit **Use my location**, and scroll to _Tonight's Brief_.
 
 ### Real email alerts
 
@@ -191,10 +194,10 @@ src/
     alerts/       Alert engine: due-alert logic + pluggable sender
                   (Resend email, console fallback), Web Push dispatch,
                   weekly digest
-  lib/            SQLite data layer, TTL cache, rate limiter, logger, api
+  lib/db/         Postgres data layer (pg adapter + in-memory PGlite), TTL cache, rate limiter, logger, api
                   envelope, satellite-map math, helpers
   config/         App constants
-data/             Local SQLite database (gitignored, auto-created)
+data/             (reserved; no longer used — the database lives in Postgres)
 public/sw.js      Service worker (push notifications)
 scripts/          check-alerts CLI
 ```
