@@ -39,6 +39,86 @@ const LOGICAL_SIZE = 480;
 const PAD = 36;
 const TRACK_REFRESH_MS = 60_000;
 
+/* Radar direction sweep — the 2D counterpart of the globe's one-way comet. */
+const SWEEP_CYCLE_MS = 12_000;
+/** How far the head travels ahead of the dot before looping (logical px). */
+const SWEEP_ARC_PX = 52;
+/** Head + trailing embers along the track behind the head. */
+const SWEEP_EMBERS = 5;
+/** Head-to-tail pixel length of the sweep. */
+const SWEEP_TRAIL_PX = 36;
+const SWEEP_HEAD_RADIUS = 5;
+const SWEEP_TAIL_RADIUS = 2.5;
+/** Distance (px) over which the sweep fades in after looping. */
+const SWEEP_SPAWN_FADE_PX = 10;
+
+/**
+ * Draw a one-way direction sweep along a future-track polyline: a bright
+ * head with a fading trail that pushes forward and loops on a slow cycle
+ * (time-modulo, so the pure draw function stays stateless). Mirrors the
+ * globe's direction comet — the light only ever moves in the direction of
+ * travel.
+ */
+function drawDirectionSweep(
+  ctx: CanvasRenderingContext2D,
+  origin: { x: number; y: number },
+  futurePts: { x: number; y: number }[],
+  color: string,
+  nowMs: number,
+) {
+  if (futurePts.length === 0) {
+    return;
+  }
+  // Pixel distance of each polyline vertex from `origin` (dists[0] = origin).
+  const dists: number[] = [0];
+  let total = 0;
+  let prev = origin;
+  for (const point of futurePts) {
+    total += Math.hypot(point.x - prev.x, point.y - prev.y);
+    dists.push(total);
+    prev = point;
+  }
+  const cycle = (nowMs % SWEEP_CYCLE_MS) / SWEEP_CYCLE_MS;
+  const headDist = cycle * SWEEP_ARC_PX;
+  // Fade in after looping so the respawn isn't a hard pop.
+  const spawnFade = Math.min(1, headDist / SWEEP_SPAWN_FADE_PX);
+  const pointAt = (d: number) => {
+    if (d <= 0) {
+      return origin;
+    }
+    if (d >= total) {
+      return futurePts[futurePts.length - 1];
+    }
+    for (let i = 1; i < dists.length; i += 1) {
+      if (dists[i] >= d) {
+        const seg = dists[i] - dists[i - 1];
+        const t = seg > 0 ? (d - dists[i - 1]) / seg : 0;
+        const a = i === 1 ? origin : futurePts[i - 2];
+        const b = futurePts[i - 1];
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+      }
+    }
+    return futurePts[futurePts.length - 1];
+  };
+  const step = SWEEP_TRAIL_PX / (SWEEP_EMBERS - 1);
+  for (let i = 0; i < SWEEP_EMBERS; i += 1) {
+    const d = Math.max(0, headDist - i * step);
+    const p = pointAt(d);
+    const trail = i / (SWEEP_EMBERS - 1);
+    const radius =
+      SWEEP_HEAD_RADIUS + (SWEEP_TAIL_RADIUS - SWEEP_HEAD_RADIUS) * trail;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = spawnFade * (1 - trail) * 0.8;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 2 + 10 * (1 - trail);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
+}
+
 function drawRadar(
   canvas: HTMLCanvasElement,
   options: {
@@ -165,6 +245,17 @@ function drawRadar(
 
     const { eastKm, northKm } = toLocalKm(moon.now.lat, moon.now.lon, location);
     const { x, y } = toCanvas(eastKm, northKm);
+    // One-way direction sweep along the Moon's future path — mirrors the
+    // globe's moon comet, so the westward drift reads at a glance.
+    const moonFuturePts = [current, ...moonFuture].map((point) => {
+      const { eastKm: e, northKm: n } = toLocalKm(
+        point.lat,
+        point.lon,
+        location,
+      );
+      return toCanvas(e, n);
+    });
+    drawDirectionSweep(ctx, { x, y }, moonFuturePts, MOON_COLOR, nowMs);
     // Ring marker — a hollow circle so it reads as "the Moon", not a satellite.
     ctx.beginPath();
     ctx.arc(x, y, 6, 0, Math.PI * 2);
@@ -213,8 +304,8 @@ function drawRadar(
       ctx.stroke();
       ctx.globalAlpha = 1;
     };
-    drawTrack(past, 0.3);
-    drawTrack(future, 0.9);
+    drawTrack(past, 0.25);
+    drawTrack(future, 0.8);
 
     const current = currentGroundPoint(tle.line1, tle.line2, now);
     if (!current) {
@@ -222,6 +313,20 @@ function drawRadar(
     }
     const { eastKm, northKm } = toLocalKm(current.lat, current.lon, location);
     const { x, y } = toCanvas(eastKm, northKm);
+
+    // One-way direction sweep along the future track (mirrors the globe's
+    // comet): a bright head with a fading trail pushing forward.
+    if (future.length > 0) {
+      const futurePts = future.map((point) => {
+        const { eastKm: e, northKm: n } = toLocalKm(
+          point.lat,
+          point.lon,
+          location,
+        );
+        return toCanvas(e, n);
+      });
+      drawDirectionSweep(ctx, { x, y }, futurePts, color, nowMs);
+    }
 
     // Blip with glow + halo
     ctx.beginPath();
@@ -573,7 +678,8 @@ export function SatelliteMap({
             <span className="text-slate-300">
               {formatCoordinates(location.lat, location.lon)}
             </span>{" "}
-            — past 30 min (dim) and the next 90 min (bright). Positions update
+            — past 30 min (dim) and the next 90 min (bright), with a light
+            sweeping forward to show the direction of travel. Positions update
             live; the dashed ring is the horizon for a ~400 km orbit.
           </p>
           <ul className="space-y-1.5">

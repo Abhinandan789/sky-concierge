@@ -35,19 +35,26 @@ interface SatelliteGlobeHudProps {
   children: React.ReactNode;
   /** Swing the camera to the observer's location ("You" legend row). */
   onCenterOnYou?: () => void;
+  /** Simulated-clock offset (ms) from the time scrubber; 0 = live. The
+   * clock display and next-pass countdown follow it. */
+  simOffsetMs?: number;
 }
 
 const PANEL =
   "pointer-events-auto rounded-xl border border-white/10 bg-slate-950/80 shadow-lg shadow-black/50 backdrop-blur-sm";
 const HEADER = "mb-2 text-[9px] font-bold uppercase tracking-[0.18em]";
 
-/** Live UTC clock, ticking every second. */
-function useUtcClock() {
-  const [now, setNow] = useState(() => new Date());
+/** Live UTC clock, ticking every second — plus an optional sim offset from
+ * the globe's time scrubber, so the HUD shows the previewed time. */
+function useUtcClock(offsetMs = 0) {
+  const [now, setNow] = useState(() => new Date(Date.now() + offsetMs));
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 1000);
+    const timer = setInterval(
+      () => setNow(new Date(Date.now() + offsetMs)),
+      1000,
+    );
     return () => clearInterval(timer);
-  }, []);
+  }, [offsetMs]);
   return now;
 }
 
@@ -405,8 +412,9 @@ export function SatelliteGlobeHud({
   colors,
   children,
   onCenterOnYou,
+  simOffsetMs = 0,
 }: SatelliteGlobeHudProps) {
-  const now = useUtcClock();
+  const now = useUtcClock(simOffsetMs);
   const { lat: observerLat, lon: observerLon } = location;
   const selectedTle = tles.find((tle) => tle.noradId === selectedId) ?? null;
   const selectedTelemetry = selectedId
@@ -433,6 +441,8 @@ export function SatelliteGlobeHud({
         horizonDeg: 10,
         windowHours: 24,
         stepSeconds: 30,
+        // Search from the previewed time, not the wall clock.
+        now: new Date(Date.now() + simOffsetMs),
       };
       const passes = findSatellitePasses(
         selectedTle.line1,
@@ -449,7 +459,7 @@ export function SatelliteGlobeHud({
       clearInterval(timer);
       window.clearTimeout(initial);
     };
-  }, [selectedTle, observerLat, observerLon]);
+  }, [selectedTle, observerLat, observerLon, simOffsetMs]);
 
   const inViewCount = useMemo(
     () =>
