@@ -1,3 +1,5 @@
+import nodemailer from "nodemailer";
+
 export interface AlertMessage {
   subject: string;
   body: string;
@@ -5,6 +7,37 @@ export interface AlertMessage {
 
 export interface AlertSender {
   send(to: string, message: AlertMessage): Promise<void>;
+}
+
+/**
+ * Sends email through Gmail's SMTP server using an App Password — the one
+ * provider that needs no domain and no provider approval (just a Gmail
+ * account with 2-Step Verification + an App Password). Configure with
+ * GMAIL_USER and GMAIL_APP_PASSWORD.
+ */
+export class GmailSmtpSender implements AlertSender {
+  private readonly transporter: nodemailer.Transporter;
+
+  constructor(
+    private readonly user: string,
+    appPassword: string,
+  ) {
+    this.transporter = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      auth: { user, pass: appPassword },
+    });
+  }
+
+  async send(to: string, message: AlertMessage): Promise<void> {
+    await this.transporter.sendMail({
+      from: `Sky Concierge <${this.user}>`,
+      to,
+      subject: message.subject,
+      text: message.body,
+    });
+  }
 }
 
 /**
@@ -97,12 +130,18 @@ export class ResendEmailSender implements AlertSender {
 }
 
 /**
- * Default sender: Brevo when BREVO_API_KEY is configured (works with a
- * verified email address, no domain needed), otherwise Resend when
- * RESEND_API_KEY is configured, otherwise the console — so the alert engine
- * works out of the box and upgrades in place.
+ * Default sender: Gmail SMTP when GMAIL_USER + GMAIL_APP_PASSWORD are
+ * configured (no domain, no provider approval), otherwise Brevo when
+ * BREVO_API_KEY is configured, otherwise Resend when RESEND_API_KEY is
+ * configured, otherwise the console — so the alert engine works out of the
+ * box and upgrades in place.
  */
 export function createSender(): AlertSender {
+  const gmailUser = process.env.GMAIL_USER;
+  const gmailAppPassword = process.env.GMAIL_APP_PASSWORD;
+  if (gmailUser && gmailAppPassword) {
+    return new GmailSmtpSender(gmailUser, gmailAppPassword);
+  }
   const brevoKey = process.env.BREVO_API_KEY;
   if (brevoKey) {
     return new BrevoEmailSender(brevoKey, process.env.BREVO_FROM ?? "");

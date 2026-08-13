@@ -106,28 +106,32 @@ demo). Open the app, hit **Use my location**, and scroll to _Tonight's Brief_.
 
 ### Real email alerts
 
-Two providers are supported. **Brevo is the no-domain option** (free, 300
-emails/day):
+Three providers are supported. **Gmail SMTP is the no-domain, no-approval
+option** — it sends from your own Gmail to any address, immediately:
 
 ```bash
 cp .env.example .env.local
-# 1. Sign up at https://brevo.com → Settings → Senders, Domains, IPs → Senders
-#    → Add a sender → verify any email address you own (no domain needed)
-# 2. Settings → API Keys → generate a key, then in .env.local set:
-#    BREVO_API_KEY="xkeysib-..."
-#    BREVO_FROM="Sky Concierge <you@gmail.com>"  # the verified address
+# 1. Google Account → Security → turn ON 2-Step Verification
+# 2. Google Account → Security → App passwords → create one for "Sky Concierge"
+# 3. In .env.local set:
+#    GMAIL_USER="you@gmail.com"
+#    GMAIL_APP_PASSWORD="16-character app password"
 pnpm check:alerts     # emails due alerts; console fallback without a key
 ```
 
-Alternatively, **Resend** (`RESEND_API_KEY` from https://resend.com/api-keys):
-note the free test sender `onboarding@resend.dev` can only deliver to *your own
-account email* — sending to other recipients requires a verified domain
-(resend.com/domains) and a matching `RESEND_FROM`.
+**Brevo** (`BREVO_API_KEY` from brevo.com, free 300 emails/day, no domain):
+verify a sender address you own in Settings → Senders, and set `BREVO_FROM`.
+Note new free accounts are gated until Brevo activates them (watch the account
+inbox for the activation email, or contact contact@brevo.com).
 
-When an email sender key (`BREVO_API_KEY` or `RESEND_API_KEY`) is set, new
-signups must confirm their email first (the confirmation link is emailed to
-them). Without a key, signups are active immediately and alerts print to the
-console.
+**Resend** (`RESEND_API_KEY` from https://resend.com/api-keys): the free test
+sender `onboarding@resend.dev` can only deliver to *your own account email* —
+sending to other recipients requires a verified domain (resend.com/domains).
+
+When any sender (`GMAIL_USER`+`GMAIL_APP_PASSWORD`, `BREVO_API_KEY` or
+`RESEND_API_KEY`) is configured, new signups must confirm their email first
+(the confirmation link is emailed to them). Without one, signups are active
+immediately and alerts print to the console.
 
 ### Push notifications
 

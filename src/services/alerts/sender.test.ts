@@ -1,14 +1,35 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { BrevoEmailSender, createSender } from "./sender";
+import {
+  BrevoEmailSender,
+  createSender,
+  GmailSmtpSender,
+} from "./sender";
+
+const createTransportMock = vi.fn();
+
+vi.mock("nodemailer", () => ({
+  default: {
+    createTransport: (...args: unknown[]) => createTransportMock(...args),
+  },
+}));
 
 describe("createSender", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    vi.clearAllMocks();
   });
 
-  it("prefers Brevo when BREVO_API_KEY is set", () => {
+  it("prefers Gmail when GMAIL_USER + GMAIL_APP_PASSWORD are set", () => {
+    vi.stubEnv("GMAIL_USER", "you@gmail.com");
+    vi.stubEnv("GMAIL_APP_PASSWORD", "abcd efgh ijkl mnop");
+    vi.stubEnv("BREVO_API_KEY", "xkeysib-test");
+    const sender = createSender();
+    expect(sender).toBeInstanceOf(GmailSmtpSender);
+  });
+
+  it("prefers Brevo when BREVO_API_KEY is set (no Gmail config)", () => {
     vi.stubEnv("BREVO_API_KEY", "xkeysib-test");
     vi.stubEnv("BREVO_FROM", "Sky Concierge <you@gmail.com>");
     vi.stubEnv("RESEND_API_KEY", "re_test");
@@ -67,5 +88,53 @@ describe("BrevoEmailSender", () => {
     await expect(
       sender.send("friend@example.com", { subject: "s", body: "b" }),
     ).rejects.toThrow(/Brevo returned HTTP 400/);
+  });
+});
+
+describe("GmailSmtpSender", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("creates a secure Gmail transporter with the app password", () => {
+    const sendMail = vi.fn().mockResolvedValue({ accepted: [] });
+    createTransportMock.mockReturnValue({ sendMail });
+
+    new GmailSmtpSender("you@gmail.com", "abcd efgh ijkl mnop");
+
+    expect(createTransportMock).toHaveBeenCalledWith({
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      auth: { user: "you@gmail.com", pass: "abcd efgh ijkl mnop" },
+    });
+  });
+
+  it("sends the message from the Gmail user with the alert content", async () => {
+    const sendMail = vi.fn().mockResolvedValue({ accepted: ["friend@example.com"] });
+    createTransportMock.mockReturnValue({ sendMail });
+    const sender = new GmailSmtpSender("you@gmail.com", "abcd efgh ijkl mnop");
+
+    await sender.send("friend@example.com", {
+      subject: "Confirm your Sky Concierge alerts",
+      body: "Click to confirm.",
+    });
+
+    expect(sendMail).toHaveBeenCalledWith({
+      from: "Sky Concierge <you@gmail.com>",
+      to: "friend@example.com",
+      subject: "Confirm your Sky Concierge alerts",
+      text: "Click to confirm.",
+    });
+  });
+
+  it("propagates SMTP failures as rejected sends", async () => {
+    createTransportMock.mockReturnValue({
+      sendMail: vi.fn().mockRejectedValue(new Error("535 auth failed")),
+    });
+    const sender = new GmailSmtpSender("you@gmail.com", "wrong-pass");
+    await expect(
+      sender.send("friend@example.com", { subject: "s", body: "b" }),
+    ).rejects.toThrow(/535 auth failed/);
   });
 });
