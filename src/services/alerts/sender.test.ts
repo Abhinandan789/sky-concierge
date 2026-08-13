@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { logger } from "@/lib/logger";
 import {
   BrevoEmailSender,
   createSender,
@@ -107,6 +108,9 @@ describe("GmailSmtpSender", () => {
       port: 465,
       secure: true,
       auth: { user: "you@gmail.com", pass: "abcd efgh ijkl mnop" },
+      connectionTimeout: 15_000,
+      greetingTimeout: 15_000,
+      socketTimeout: 20_000,
     });
   });
 
@@ -128,13 +132,29 @@ describe("GmailSmtpSender", () => {
     });
   });
 
-  it("propagates SMTP failures as rejected sends", async () => {
+  it("propagates SMTP failures and logs the provider's exact reason", async () => {
+    const logError = vi.spyOn(logger, "error").mockImplementation(() => {});
+    const smtpError = Object.assign(new Error("535 5.7.8 auth failed"), {
+      code: "EAUTH",
+      responseCode: 535,
+      response: "535 5.7.8 Username and Password not accepted",
+    });
     createTransportMock.mockReturnValue({
-      sendMail: vi.fn().mockRejectedValue(new Error("535 auth failed")),
+      sendMail: vi.fn().mockRejectedValue(smtpError),
     });
     const sender = new GmailSmtpSender("you@gmail.com", "wrong-pass");
+
     await expect(
       sender.send("friend@example.com", { subject: "s", body: "b" }),
-    ).rejects.toThrow(/535 auth failed/);
+    ).rejects.toThrow(/535 5\.7\.8 auth failed/);
+
+    expect(logError).toHaveBeenCalledWith("Gmail SMTP send failed", {
+      to: "friend@example.com",
+      provider: "gmail",
+      code: "EAUTH",
+      smtpResponseCode: 535,
+      smtpResponse: "535 5.7.8 Username and Password not accepted",
+      reason: "535 5.7.8 auth failed",
+    });
   });
 });

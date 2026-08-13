@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { logger } from "@/lib/logger";
 
 export interface AlertMessage {
   subject: string;
@@ -14,6 +15,13 @@ export interface AlertSender {
  * provider that needs no domain and no provider approval (just a Gmail
  * account with 2-Step Verification + an App Password). Configure with
  * GMAIL_USER and GMAIL_APP_PASSWORD.
+ *
+ * Gmail has no delivery webhook, so failures are captured here instead:
+ * every rejected send is logged with nodemailer's error code and the SMTP
+ * server's exact response (e.g. "535 5.7.8 Username and Password not
+ * accepted") so misconfigurations are diagnosable from the logs alone.
+ * Connection timeouts keep a hung SMTP session from stalling a serverless
+ * function.
  */
 export class GmailSmtpSender implements AlertSender {
   private readonly transporter: nodemailer.Transporter;
@@ -27,16 +35,37 @@ export class GmailSmtpSender implements AlertSender {
       port: 465,
       secure: true,
       auth: { user, pass: appPassword },
+      connectionTimeout: 15_000,
+      greetingTimeout: 15_000,
+      socketTimeout: 20_000,
     });
   }
 
   async send(to: string, message: AlertMessage): Promise<void> {
-    await this.transporter.sendMail({
-      from: `Sky Concierge <${this.user}>`,
-      to,
-      subject: message.subject,
-      text: message.body,
-    });
+    try {
+      await this.transporter.sendMail({
+        from: `Sky Concierge <${this.user}>`,
+        to,
+        subject: message.subject,
+        text: message.body,
+      });
+    } catch (error) {
+      const err = error as {
+        code?: string;
+        responseCode?: number;
+        response?: string;
+        message?: string;
+      };
+      logger.error("Gmail SMTP send failed", {
+        to,
+        provider: "gmail",
+        code: err.code ?? null,
+        smtpResponseCode: err.responseCode ?? null,
+        smtpResponse: err.response ?? null,
+        reason: err.message ?? String(error),
+      });
+      throw error;
+    }
   }
 }
 
