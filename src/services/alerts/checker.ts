@@ -20,6 +20,11 @@ import {
 } from "@/lib/utils";
 import { buildTonightBrief } from "@/services/sky/brief";
 import type { AlertEventType, SkyBrief } from "@/types";
+import {
+  renderAlertEmail,
+  renderDigestEmail,
+  type DigestSection,
+} from "./email-template";
 import { sendPush } from "./push";
 import {
   ConsoleSender,
@@ -116,18 +121,39 @@ function nearLocation(
   );
 }
 
-/** Every emailed alert carries an unsubscribe link (CAN-SPAM friendly). */
+/** Unsubscribe URL for a subscription, or undefined when it has no token. */
+function unsubscribeUrlFor(
+  subscription: SubscriptionLike,
+): string | undefined {
+  if (!subscription.unsubscribeToken) {
+    return undefined;
+  }
+  return `${siteUrl()}/unsubscribe?token=${subscription.unsubscribeToken}`;
+}
+
+/**
+ * Every emailed alert carries an unsubscribe link (CAN-SPAM friendly).
+ * The HTML body already embeds the link in its footer; the text body gets it
+ * appended here, and the RFC 2369 List-Unsubscribe headers give mail clients
+ * (and Gmail's one-click unsubscribe) a machine-readable escape hatch — a
+ * real deliverability win with Gmail's spam classifier.
+ */
 function withUnsubscribeFooter(
   message: AlertMessage,
   subscription: SubscriptionLike,
 ): AlertMessage {
-  if (!subscription.unsubscribeToken) {
+  const url = unsubscribeUrlFor(subscription);
+  if (!url) {
     return message;
   }
-  const url = `${siteUrl()}/unsubscribe?token=${subscription.unsubscribeToken}`;
   return {
     subject: message.subject,
     body: `${message.body}\n\n—\nSky Concierge · unsubscribe: ${url}`,
+    html: message.html,
+    headers: {
+      "List-Unsubscribe": `<${url}>`,
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    },
   };
 }
 
@@ -156,6 +182,9 @@ export function candidatesFromBrief(
     // Skip passes that are already underway.
     if (minutesUntil >= 0 && minutesUntil <= ISS_ALERT_LEAD_MINUTES) {
       const satelliteName = next.satelliteName ?? "ISS";
+      const rises = formatTime(next.start, timeZone);
+      const lookAt = formatTime(next.max, timeZone);
+      const duration = Math.round(next.durationMinutes);
       candidates.push({
         subscriptionId: subscription.id,
         email: subscription.email,
@@ -163,9 +192,26 @@ export function candidatesFromBrief(
         message: {
           subject: `${satelliteName} pass in ~${minutesUntil} min over your location`,
           body: [
-            `Rises ${formatTime(next.start, timeZone)} and reaches ${next.maxElevationDeg}° for ${Math.round(next.durationMinutes)} minutes.`,
-            `Look ${formatCompass(next.maxAzimuthDeg)} at ${formatTime(next.max, timeZone)} — no telescope needed.`,
+            `Rises ${rises} and reaches ${next.maxElevationDeg}° for ${duration} minutes.`,
+            `Look ${formatCompass(next.maxAzimuthDeg)} at ${lookAt} — no telescope needed.`,
           ].join("\n"),
+          html: renderAlertEmail({
+            eyebrow: "Satellite pass",
+            title: `${satelliteName} in ~${minutesUntil} min`,
+            intro: `Get ready — a ${satelliteName} pass is coming up over your location.`,
+            facts: [
+              { label: "Rises", value: rises },
+              {
+                label: "Peak",
+                value: `${next.maxElevationDeg}° elevation for ${duration} minutes`,
+              },
+              {
+                label: "Look",
+                value: `${formatCompass(next.maxAzimuthDeg)} at ${lookAt} — no telescope needed`,
+              },
+            ],
+            unsubscribeUrl: unsubscribeUrlFor(subscription),
+          }),
         },
       });
     }
@@ -181,6 +227,20 @@ export function candidatesFromBrief(
         message: {
           subject: `Aurora watch tonight — Kp ${brief.aurora.maxKpTonight}`,
           body: `Predicted Kp ${brief.aurora.maxKpTonight} (${brief.aurora.level}) in the next 12 hours.\n${brief.aurora.viewingLatitudeHint}.\nFind a dark spot with a clear northern view.`,
+          html: renderAlertEmail({
+            eyebrow: "Aurora alert",
+            title: `Aurora watch tonight`,
+            intro: `The forecast predicts active aurora conditions in the next 12 hours.`,
+            facts: [
+              {
+                label: "Intensity",
+                value: `Predicted Kp ${brief.aurora.maxKpTonight} (${brief.aurora.level})`,
+              },
+              { label: "Where", value: brief.aurora.viewingLatitudeHint },
+            ],
+            note: "Find a dark spot with a clear northern view.",
+            unsubscribeUrl: unsubscribeUrlFor(subscription),
+          }),
         },
       });
     }
@@ -202,6 +262,20 @@ export function candidatesFromBrief(
               ? `${peakSoon.name} peak tonight ✨`
               : `${peakSoon.name} peak in ${peakSoon.daysUntilPeak} days`,
           body: `${peakSoon.name} peaks on ${peakSoon.peakDate} with up to ${peakSoon.zhr} meteors/hour.\nBest viewing after midnight, away from city lights.`,
+          html: renderAlertEmail({
+            eyebrow: "Meteor shower",
+            title:
+              peakSoon.daysUntilPeak === 0
+                ? `${peakSoon.name} — peak tonight`
+                : `${peakSoon.name} — peak in ${peakSoon.daysUntilPeak} days`,
+            intro: `Up to ${peakSoon.zhr} meteors an hour at the peak.`,
+            facts: [
+              { label: "Peak date", value: peakSoon.peakDate },
+              { label: "Rate", value: `up to ${peakSoon.zhr} meteors/hour` },
+            ],
+            note: "Best viewing after midnight, away from city lights.",
+            unsubscribeUrl: unsubscribeUrlFor(subscription),
+          }),
         },
       });
     }
@@ -421,11 +495,15 @@ export interface DigestOptions {
   db?: SkyDb;
 }
 
-/** Compose the weekly "sky highlights" email from a computed brief. */
+/**
+ * Compose the weekly "sky highlights" email from a computed brief — as
+ * plain text for compatibility and as styled HTML for the pretty version.
+ */
 export function composeDigestMessage(
   brief: SkyBrief,
   now: Date,
   timeZone?: string,
+  unsubscribeUrl?: string,
 ): AlertMessage {
   const lines: string[] = [
     `Weekly sky highlights for your location (${brief.location.lat.toFixed(2)}, ${brief.location.lon.toFixed(2)}):`,
@@ -460,24 +538,56 @@ export function composeDigestMessage(
     );
   }
 
-  lines.push(
-    "",
-    `Moon: ${brief.moon.phaseName}, ${Math.round(brief.moon.illumination * 100)}% illuminated.`,
-    "",
-    now.toLocaleDateString([], {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    }),
-  );
+  const moonLine = `Moon: ${brief.moon.phaseName}, ${Math.round(brief.moon.illumination * 100)}% illuminated.`;
+  lines.push("", moonLine, "");
+  const dateLabel = now.toLocaleDateString([], {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  lines.push(dateLabel);
 
-  if (nextPasses.length === 0 && showersSoon.length === 0 && !brief.aurora) {
+  const quiet = nextPasses.length === 0 && showersSoon.length === 0 && !brief.aurora;
+  if (quiet) {
     lines.splice(1, 0, "", "Nothing notable this week — the sky is quiet.");
   }
+
+  const sections: DigestSection[] = [];
+  if (nextPasses.length > 0) {
+    sections.push({
+      title: "Satellite passes",
+      items: nextPasses.map(
+        (pass) =>
+          `${formatDayTime(pass.start, timeZone)} — ${pass.satelliteName ?? "Satellite"}, max ${pass.maxElevationDeg}° for ${Math.round(pass.durationMinutes)} min`,
+      ),
+    });
+  }
+  if (showersSoon.length > 0) {
+    sections.push({
+      title: "Meteor showers",
+      items: showersSoon.map(
+        (shower) =>
+          `${shower.name} peaks ${shower.daysUntilPeak === 0 ? "tonight" : `in ${shower.daysUntilPeak} days`} (~${shower.zhr}/hr)`,
+      ),
+    });
+  }
+  if (brief.aurora) {
+    sections.push({
+      title: "Aurora watch",
+      items: [`Predicted Kp ${brief.aurora.maxKpTonight} (${brief.aurora.level}). ${brief.aurora.viewingLatitudeHint}.`],
+    });
+  }
+  sections.push({ title: "Moon", items: [moonLine] });
 
   return {
     subject: "Sky Concierge — weekly sky highlights",
     body: lines.join("\n"),
+    html: renderDigestEmail({
+      dateLabel,
+      sections,
+      quietNote: quiet ? "Nothing notable this week — the sky is quiet." : undefined,
+      unsubscribeUrl,
+    }),
   };
 }
 
@@ -517,7 +627,12 @@ export async function runDigestCheck(
       await sender.send(
         subscription.email,
         withUnsubscribeFooter(
-          composeDigestMessage(brief, now, timeZone),
+          composeDigestMessage(
+            brief,
+            now,
+            timeZone,
+            unsubscribeUrlFor(subscription),
+          ),
           subscription,
         ),
       );
