@@ -133,6 +133,13 @@ When any sender (`GMAIL_USER`+`GMAIL_APP_PASSWORD`, `BREVO_API_KEY` or
 (the confirmation link is emailed to them). Without one, signups are active
 immediately and alerts print to the console.
 
+Confirmation emails are sent as styled HTML (dark space theme) with the plain
+text body as a fallback. Emails from a fresh Gmail address with no custom
+domain can land in **Spam/Promotions** — the subscribe screen already tells
+visitors to check there, and adding the sender to contacts improves
+deliverability. A verified domain on the sending side (Gmail via Google
+Workspace, or Brevo/Resend) removes most of that risk.
+
 ### Push notifications
 
 ```bash
