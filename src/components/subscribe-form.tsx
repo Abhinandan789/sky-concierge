@@ -3,6 +3,7 @@
 import {
   Bell,
   CheckCircle2,
+  Info,
   Loader2,
   Mail,
   Plus,
@@ -153,6 +154,16 @@ export function SubscribeSection({
           <span className="text-slate-200">{email}</span>. Alerts start as soon
           as you click it — and you can unsubscribe anytime from any email.
         </p>
+        <div className="mt-4 flex items-start gap-2 rounded-xl border border-amber-400/20 bg-amber-400/10 px-3 py-2.5 text-left">
+          <Info className="mt-0.5 size-3.5 shrink-0 text-amber-300" />
+          <p className="text-xs leading-relaxed text-amber-200/90">
+            Can&apos;t find it? Check your{" "}
+            <span className="font-semibold text-amber-100">Spam</span> or{" "}
+            <span className="font-semibold text-amber-100">Promotions</span>{" "}
+            folder — confirmation emails can land there. Adding the sender to
+            your contacts keeps them in your inbox.
+          </p>
+        </div>
       </div>
     );
   }
