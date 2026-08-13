@@ -136,6 +136,32 @@ describe("GmailSmtpSender", () => {
     });
   });
 
+  it("passes extra headers (e.g. List-Unsubscribe) through", async () => {
+    const sendMail = vi.fn().mockResolvedValue({ accepted: ["friend@example.com"] });
+    createTransportMock.mockReturnValue({ sendMail });
+    const sender = new GmailSmtpSender("you@gmail.com", "abcd efgh ijkl mnop");
+
+    await sender.send("friend@example.com", {
+      subject: "ISS pass in ~45 min",
+      body: "Rises 22:14.",
+      headers: {
+        "List-Unsubscribe": "<https://example.com/unsubscribe?token=x>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+      },
+    });
+
+    expect(sendMail).toHaveBeenCalledWith({
+      from: "Sky Concierge <you@gmail.com>",
+      to: "friend@example.com",
+      subject: "ISS pass in ~45 min",
+      text: "Rises 22:14.",
+      headers: {
+        "List-Unsubscribe": "<https://example.com/unsubscribe?token=x>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+      },
+    });
+  });
+
   it("passes the HTML body through when provided", async () => {
     const sendMail = vi.fn().mockResolvedValue({ accepted: ["friend@example.com"] });
     createTransportMock.mockReturnValue({ sendMail });

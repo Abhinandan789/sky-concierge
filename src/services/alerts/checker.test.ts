@@ -7,6 +7,7 @@ import {
   upsertSubscription,
 } from "@/lib/db";
 import { formatTime } from "@/lib/utils";
+import { siteUrl } from "@/config/site";
 import type { IssPass, SkyBrief } from "@/types";
 import * as briefModule from "@/services/sky/brief";
 import { sendPush } from "./push";
@@ -103,6 +104,18 @@ describe("candidatesFromBrief", () => {
     expect(candidates.find((c) => c.eventType === "iss")?.message.subject).toBe(
       "ISS pass in ~30 min over your location",
     );
+  });
+
+  it("ships a styled HTML body alongside the plain text", () => {
+    const candidates = candidatesFromBrief(
+      SUBSCRIPTION,
+      makeBrief({ issPasses: [makePass(30)] }),
+      NOW,
+    );
+    const message = candidates.find((c) => c.eventType === "iss")?.message;
+    expect(message?.html).toBeDefined();
+    expect(message?.html).toContain("ISS in ~30 min");
+    expect(message?.html).toContain("Satellite pass");
   });
 
   it("uses the satellite name in the alert subject when present", () => {
@@ -551,10 +564,17 @@ describe("runAlertCheck", () => {
     const message = (
       sender.send.mock.calls[0] as unknown as [
         string,
-        { subject: string; body: string },
+        { subject: string; body: string; html?: string; headers?: Record<string, string> },
       ]
     )[1];
     expect(message.body).toContain(`/unsubscribe?token=${unsubscribeToken}`);
+    // The HTML body embeds the same unsubscribe link in its footer.
+    expect(message.html).toContain(`/unsubscribe?token=${unsubscribeToken}`);
+    // RFC 2369 headers give mail clients (and Gmail) one-click unsubscribe.
+    expect(message.headers).toEqual({
+      "List-Unsubscribe": `<${siteUrl()}/unsubscribe?token=${unsubscribeToken}>`,
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    });
   });
 });
 

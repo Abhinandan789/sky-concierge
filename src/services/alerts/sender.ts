@@ -6,6 +6,11 @@ export interface AlertMessage {
   body: string;
   /** Optional HTML version of `body` — sent when a provider supports it. */
   html?: string;
+  /**
+   * Optional extra headers (e.g. `List-Unsubscribe` for CAN-SPAM compliance
+   * and better deliverability). Applied by providers that support them.
+   */
+  headers?: Record<string, string>;
 }
 
 export interface AlertSender {
@@ -52,6 +57,9 @@ export class GmailSmtpSender implements AlertSender {
     };
     if (message.html) {
       mail.html = message.html;
+    }
+    if (message.headers) {
+      mail.headers = message.headers;
     }
     try {
       await this.transporter.sendMail(mail);
@@ -108,6 +116,9 @@ export class BrevoEmailSender implements AlertSender {
     if (message.html) {
       payload.htmlContent = message.html;
     }
+    if (message.headers) {
+      payload.headers = message.headers;
+    }
     const response = await fetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: {
@@ -155,6 +166,9 @@ export class ResendEmailSender implements AlertSender {
     };
     if (message.html) {
       payload.html = message.html;
+    }
+    if (message.headers) {
+      payload.headers = message.headers;
     }
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",

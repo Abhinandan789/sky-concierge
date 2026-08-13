@@ -12,6 +12,42 @@ export interface ConfirmationEmailOptions {
   pendingChange?: boolean;
 }
 
+/** A labelled fact row in an alert email (e.g. label "Rises", value "22:14"). */
+export interface AlertFact {
+  label: string;
+  value: string;
+}
+
+export interface AlertEmailOptions {
+  /** Small uppercase label above the title, e.g. "SATELLITE PASS". */
+  eyebrow: string;
+  title: string;
+  /** One or two sentences of context under the title. */
+  intro: string;
+  /** Key facts rendered as label/value rows. */
+  facts: AlertFact[];
+  /** Optional small print under the facts. */
+  note?: string;
+  /** Full unsubscribe URL; when set, the footer links to it. */
+  unsubscribeUrl?: string;
+}
+
+export interface DigestSection {
+  title: string;
+  items: string[];
+}
+
+export interface DigestEmailOptions {
+  /** e.g. "Tuesday, August 11, 2026". */
+  dateLabel: string;
+  /** Content sections, rendered in order. */
+  sections: DigestSection[];
+  /** Shown prominently when there is nothing notable to report. */
+  quietNote?: string;
+  /** Full unsubscribe URL; when set, the footer links to it. */
+  unsubscribeUrl?: string;
+}
+
 /** Escape dynamic values so a token or address can never break the markup. */
 function esc(value: string): string {
   return value
@@ -38,15 +74,22 @@ const C = {
   ctaTo: "#6366f1",
 };
 
+const DEFAULT_FOOTER =
+  "You are receiving this because you subscribed to Sky Concierge.<br>Every alert email includes a one-click unsubscribe link.";
+
 /**
  * The email shell: brand wordmark, a centered card, and a quiet footer.
  * `preheader` is the hidden preview text shown next to the subject line.
+ * `footerHtml` replaces the default footer when provided (e.g. to link the
+ * actual unsubscribe URL for an alert email).
  */
 export function renderEmailShell(options: {
   preheader: string;
   children: string;
+  footerHtml?: string;
 }): string {
-  const { preheader, children } = options;
+  const { preheader, children, footerHtml } = options;
+  const footer = footerHtml ?? DEFAULT_FOOTER;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -88,8 +131,7 @@ export function renderEmailShell(options: {
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px auto 0;max-width:520px;">
         <tr>
           <td align="center" style="font-family:${FONT};font-size:11px;line-height:18px;color:${C.faint};">
-            You are receiving this because you subscribed to Sky Concierge.<br>
-            Every alert email includes a one-click unsubscribe link.
+            ${footer}
           </td>
         </tr>
       </table>
@@ -99,6 +141,141 @@ export function renderEmailShell(options: {
 </body>
 </html>
 `;
+}
+
+/** Shared opener for alert-style emails: eyebrow, title, intro. */
+function renderAlertHead(options: {
+  eyebrow: string;
+  title: string;
+  intro: string;
+}): string {
+  return `
+      <table role="presentation" cellpadding="0" cellspacing="0">
+        <tr>
+          <td align="center" style="font-family:${FONT};font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:${C.accent};">
+            ${esc(options.eyebrow)}
+          </td>
+        </tr>
+      </table>
+      <h1 style="margin:10px 0 0;font-family:${FONT};font-size:24px;font-weight:700;color:${C.text};letter-spacing:-0.2px;">
+        ${esc(options.title)}
+      </h1>
+      <p style="margin:12px auto 0;max-width:460px;font-family:${FONT};font-size:14px;line-height:22px;color:${C.muted};">
+        ${esc(options.intro)}
+      </p>`;
+}
+
+function renderFactRows(facts: AlertFact[]): string {
+  if (facts.length === 0) {
+    return "";
+  }
+  return facts
+    .map(
+      (fact) => `
+      <tr>
+        <td style="width:96px;padding:9px 0;font-family:${FONT};font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:${C.accent};vertical-align:top;">
+          ${esc(fact.label)}
+        </td>
+        <td style="padding:9px 0;font-family:${FONT};font-size:14px;line-height:22px;color:${C.text};">
+          ${esc(fact.value)}
+        </td>
+      </tr>`,
+    )
+    .join("");
+}
+
+/** Footer used by alert emails: unsubscribe link when one is available. */
+function alertFooter(unsubscribeUrl?: string): string | undefined {
+  if (!unsubscribeUrl) {
+    return undefined;
+  }
+  return `You are receiving this because you subscribed to Sky Concierge.<br><a href="${esc(unsubscribeUrl)}" target="_blank" style="color:${C.accent};text-decoration:underline;">Unsubscribe from these alerts</a>`;
+}
+
+/** A single due-alert email (satellite pass, aurora, or meteor shower). */
+export function renderAlertEmail(options: AlertEmailOptions): string {
+  const { eyebrow, title, intro, facts, note, unsubscribeUrl } = options;
+  const noteHtml = note
+    ? `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0 0;">
+        <tr>
+          <td style="border-top:1px solid ${C.cardBorder};padding-top:14px;font-family:${FONT};font-size:13px;line-height:20px;color:${C.muted};">
+            ${esc(note)}
+          </td>
+        </tr>
+      </table>`
+    : "";
+
+  return renderEmailShell({
+    preheader: `${eyebrow} — ${title}`,
+    footerHtml: alertFooter(unsubscribeUrl),
+    children: `
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+  <tr>
+    <td align="center">
+      ${renderAlertHead({ eyebrow, title, intro })}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0 0;">
+        ${renderFactRows(facts)}
+      </table>
+      ${noteHtml}
+    </td>
+  </tr>
+</table>`,
+  });
+}
+
+/** The weekly sky-highlights digest. */
+export function renderDigestEmail(options: DigestEmailOptions): string {
+  const { dateLabel, sections, quietNote, unsubscribeUrl } = options;
+
+  const sectionHtml = sections
+    .map(
+      (section) => `
+      <tr>
+        <td style="padding:18px 0 6px;font-family:${FONT};font-size:11px;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;color:${C.accent};">
+          ${esc(section.title)}
+        </td>
+      </tr>
+      ${section.items
+        .map(
+          (item) => `
+      <tr>
+        <td style="padding:4px 0;font-family:${FONT};font-size:14px;line-height:22px;color:${C.text};">
+          <span style="color:${C.accent};">✦</span>&nbsp; ${esc(item)}
+        </td>
+      </tr>`,
+        )
+        .join("")}`,
+    )
+    .join("");
+
+  const quietHtml = quietNote
+    ? `
+      <p style="margin:16px 0 0;font-family:${FONT};font-size:15px;line-height:24px;color:${C.muted};">
+        ${esc(quietNote)}
+      </p>`
+    : "";
+
+  return renderEmailShell({
+    preheader: "Weekly sky highlights",
+    footerHtml: alertFooter(unsubscribeUrl),
+    children: `
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+  <tr>
+    <td align="center">
+      ${renderAlertHead({
+        eyebrow: "WEEKLY DIGEST",
+        title: "Sky highlights",
+        intro: `The week ahead for your location — ${esc(dateLabel)}.`,
+      })}
+      ${quietHtml}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:8px 0 0;">
+        ${sectionHtml}
+      </table>
+    </td>
+  </tr>
+</table>`,
+  });
 }
 
 /** The double-opt-in email: a friendly CTA button plus the raw link as fallback. */
