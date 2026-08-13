@@ -6,6 +6,7 @@ import { getDb, upsertSubscription } from "@/lib/db";
 import { isEmail, parseNumber, validateLatLon } from "@/lib/utils";
 
 import { parseSatelliteIds } from "@/config/satellites";
+import { renderConfirmationEmail } from "@/services/alerts/email-template";
 import { createSender } from "@/services/alerts/sender";
 import { ALERT_EVENT_TYPES, type AlertEventType } from "@/types";
 
@@ -136,17 +137,18 @@ export async function POST(request: NextRequest) {
       // (dev servers rarely run on the localhost:3000 default).
       const baseUrl = process.env.SITE_URL ?? new URL(request.url).origin;
       const confirmUrl = `${baseUrl}/verify?token=${subscription.verifyToken}`;
+      const pendingChange = subscription.pendingChange;
       try {
         await createSender().send(email, {
-          subject: subscription.pendingChange
+          subject: pendingChange
             ? "Confirm your Sky Concierge alert changes"
             : "Confirm your Sky Concierge alerts",
           body: [
-            subscription.pendingChange
+            pendingChange
               ? "Someone (possibly you) requested to update this Sky Concierge subscription."
               : "Thanks for subscribing to Sky Concierge!",
             "",
-            subscription.pendingChange
+            pendingChange
               ? "Confirm your email to apply the changes."
               : "One more step: confirm your email to start receiving alerts.",
             "",
@@ -154,6 +156,7 @@ export async function POST(request: NextRequest) {
             "",
             "If you didn't request this, you can safely ignore this email — nothing changes.",
           ].join("\n"),
+          html: renderConfirmationEmail({ confirmUrl, pendingChange }),
         });
       } catch (error) {
         logger.error("Verification email send failed", {

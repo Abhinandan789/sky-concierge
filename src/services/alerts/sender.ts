@@ -4,6 +4,8 @@ import { logger } from "@/lib/logger";
 export interface AlertMessage {
   subject: string;
   body: string;
+  /** Optional HTML version of `body` — sent when a provider supports it. */
+  html?: string;
 }
 
 export interface AlertSender {
@@ -42,13 +44,17 @@ export class GmailSmtpSender implements AlertSender {
   }
 
   async send(to: string, message: AlertMessage): Promise<void> {
+    const mail: nodemailer.SendMailOptions = {
+      from: `Sky Concierge <${this.user}>`,
+      to,
+      subject: message.subject,
+      text: message.body,
+    };
+    if (message.html) {
+      mail.html = message.html;
+    }
     try {
-      await this.transporter.sendMail({
-        from: `Sky Concierge <${this.user}>`,
-        to,
-        subject: message.subject,
-        text: message.body,
-      });
+      await this.transporter.sendMail(mail);
     } catch (error) {
       const err = error as {
         code?: string;
@@ -93,18 +99,22 @@ export class BrevoEmailSender implements AlertSender {
   }
 
   async send(to: string, message: AlertMessage): Promise<void> {
+    const payload: Record<string, unknown> = {
+      sender: { name: this.name, email: this.email },
+      to: [{ email: to }],
+      subject: message.subject,
+      textContent: message.body,
+    };
+    if (message.html) {
+      payload.htmlContent = message.html;
+    }
     const response = await fetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: {
         "api-key": this.apiKey,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        sender: { name: this.name, email: this.email },
-        to: [{ email: to }],
-        subject: message.subject,
-        textContent: message.body,
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
@@ -137,18 +147,22 @@ export class ResendEmailSender implements AlertSender {
   ) {}
 
   async send(to: string, message: AlertMessage): Promise<void> {
+    const payload: Record<string, unknown> = {
+      from: this.from,
+      to: [to],
+      subject: message.subject,
+      text: message.body,
+    };
+    if (message.html) {
+      payload.html = message.html;
+    }
     const response = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        from: this.from,
-        to: [to],
-        subject: message.subject,
-        text: message.body,
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
@@ -196,5 +210,9 @@ export class ConsoleSender implements AlertSender {
     console.log(`[sky-concierge] Subject: ${message.subject}`);
     // eslint-disable-next-line no-console
     console.log(message.body);
+    if (message.html) {
+      // eslint-disable-next-line no-console
+      console.log(`[sky-concierge] html: ${message.html.length} chars`);
+    }
   }
 }

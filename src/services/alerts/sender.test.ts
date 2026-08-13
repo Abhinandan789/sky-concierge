@@ -81,6 +81,28 @@ describe("BrevoEmailSender", () => {
     });
   });
 
+  it("includes htmlContent when the message has an HTML body", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+    const sender = new BrevoEmailSender("xkeysib-test", "you@gmail.com");
+
+    await sender.send("friend@example.com", {
+      subject: "Confirm your Sky Concierge alerts",
+      body: "Click to confirm.",
+      html: "<p>Click <a href=\"https://example.com\">here</a>.</p>",
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toEqual({
+      sender: { name: "Sky Concierge", email: "you@gmail.com" },
+      to: [{ email: "friend@example.com" }],
+      subject: "Confirm your Sky Concierge alerts",
+      textContent: "Click to confirm.",
+      htmlContent: "<p>Click <a href=\"https://example.com\">here</a>.</p>",
+    });
+  });
+
   it("throws with the API detail when Brevo rejects the send", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("{\"message\":\"invalid sender\"}", { status: 400 }),
@@ -111,6 +133,26 @@ describe("GmailSmtpSender", () => {
       connectionTimeout: 15_000,
       greetingTimeout: 15_000,
       socketTimeout: 20_000,
+    });
+  });
+
+  it("passes the HTML body through when provided", async () => {
+    const sendMail = vi.fn().mockResolvedValue({ accepted: ["friend@example.com"] });
+    createTransportMock.mockReturnValue({ sendMail });
+    const sender = new GmailSmtpSender("you@gmail.com", "abcd efgh ijkl mnop");
+
+    await sender.send("friend@example.com", {
+      subject: "Confirm your Sky Concierge alerts",
+      body: "Click to confirm.",
+      html: "<p>Hello</p>",
+    });
+
+    expect(sendMail).toHaveBeenCalledWith({
+      from: "Sky Concierge <you@gmail.com>",
+      to: "friend@example.com",
+      subject: "Confirm your Sky Concierge alerts",
+      text: "Click to confirm.",
+      html: "<p>Hello</p>",
     });
   });
 
