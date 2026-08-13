@@ -109,7 +109,9 @@ export async function POST(request: NextRequest) {
   // With a real email sender configured we require double opt-in; without
   // one (console/dev mode) the subscription is active immediately.
   const needsVerification = Boolean(
-    process.env.RESEND_API_KEY || process.env.BREVO_API_KEY,
+    process.env.RESEND_API_KEY ||
+      process.env.BREVO_API_KEY ||
+      (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD),
   );
 
   try {
