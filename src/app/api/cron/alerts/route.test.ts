@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.stubEnv("SKY_DB_PATH", ":memory:");
+// In-memory DB for every route test — read lazily by getDb().
+vi.stubEnv("DATABASE_URL", ":memory:");
 
 import { NextRequest } from "next/server";
 import { GET as cronGet } from "./route";
@@ -20,7 +21,7 @@ describe("GET /api/cron/alerts", () => {
   beforeEach(() => {
     resetDb();
     vi.unstubAllEnvs();
-    vi.stubEnv("SKY_DB_PATH", ":memory:");
+    vi.stubEnv("DATABASE_URL", ":memory:");
   });
 
   it("runs the alert check with no subscriptions (empty DB, no network)", async () => {
