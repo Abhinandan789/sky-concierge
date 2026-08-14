@@ -15,6 +15,8 @@ export interface IssPass {
   durationMinutes: number;
   /** Satellite name from the TLE, e.g. "ISS (ZARYA)". Set by the brief builder. */
   satelliteName?: string;
+  /** NORAD catalog id this pass belongs to. Set by the brief builder. */
+  noradId?: string;
 }
 
 export type AuroraLevel = "LOW" | "MODERATE" | "HIGH" | "STORM";

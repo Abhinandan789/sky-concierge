@@ -53,7 +53,12 @@ const SWEEP_TRAIL_PX = 36;
 const SWEEP_HEAD_RADIUS = 5;
 const SWEEP_TAIL_RADIUS = 2.5;
 /** Distance (px) over which the sweep fades in after looping. */
-const SWEEP_SPAWN_FADE_PX = 10;
+const SWEEP_SPAWN_FADE_PX = 8;
+/** Distance (px) over which the sweep fades OUT near the end of its arc, so
+ * it dissolves instead of snapping back to the dot (which read as backward
+ * travel along the dim past path). Matches the globe's comet envelope;
+ * kept short so the sweep spends most of its cycle fully visible. */
+const SWEEP_FADE_OUT_PX = 12;
 
 /**
  * Draw a one-way direction sweep along a future-track polyline: a bright
@@ -83,8 +88,15 @@ function drawDirectionSweep(
   }
   const cycle = (nowMs % SWEEP_CYCLE_MS) / SWEEP_CYCLE_MS;
   const headDist = cycle * SWEEP_ARC_PX;
-  // Fade in after looping so the respawn isn't a hard pop.
-  const spawnFade = Math.min(1, headDist / SWEEP_SPAWN_FADE_PX);
+  // Envelope: fade in after looping AND fade out near the end of the arc, so
+  // the head dissolves into the distance and a fresh one emerges from the dot
+  // — the loop never visibly snaps back (which read as backward travel).
+  const fadeIn = Math.min(1, headDist / SWEEP_SPAWN_FADE_PX);
+  const fadeOut = Math.min(
+    1,
+    (SWEEP_ARC_PX - headDist) / SWEEP_FADE_OUT_PX,
+  );
+  const envelope = Math.min(fadeIn, fadeOut);
   const pointAt = (d: number) => {
     if (d <= 0) {
       return origin;
@@ -113,7 +125,7 @@ function drawDirectionSweep(
     ctx.beginPath();
     ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
     ctx.fillStyle = color;
-    ctx.globalAlpha = spawnFade * (1 - trail) * 0.8;
+    ctx.globalAlpha = envelope * (1 - trail) * 0.8;
     ctx.shadowColor = color;
     ctx.shadowBlur = 2 + 10 * (1 - trail);
     ctx.fill();

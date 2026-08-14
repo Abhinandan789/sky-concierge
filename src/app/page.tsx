@@ -7,10 +7,12 @@ import { SatellitePicker } from "@/components/satellite-picker";
 import { LocationInput } from "@/components/location-input";
 import { SkyViewSection } from "@/components/sky-view-section";
 import { SkyBriefSection } from "@/components/sky-brief-view";
+import { SatellitePassesPanel } from "@/components/satellite-passes-panel";
+import { StickyAlertsBar } from "@/components/sticky-alerts-bar";
 import { SubscribeSection } from "@/components/subscribe-form";
 import { parseSatelliteIds } from "@/config/satellites";
 import { APP_DESCRIPTION, DATA_SOURCES, DEFAULT_LOCATION } from "@/config/site";
-import { formatCoordinates, parseNumber, validateLatLon } from "@/lib/utils";
+import { parseNumber, validateLatLon } from "@/lib/utils";
 
 export const metadata: Metadata = {
   title: "Tonight's Sky",
@@ -93,11 +95,7 @@ export default async function HomePage({
           </a>
         </div>
 
-        <p className="mono mt-6 text-xs text-slate-500">
-          showing {formatCoordinates(location.lat, location.lon)}
-        </p>
-
-        <div className="mt-4">
+        <div className="mt-6">
           <LocationInput
             defaultLat={location.lat}
             defaultLon={location.lon}
@@ -125,23 +123,41 @@ export default async function HomePage({
         <SatellitePicker
           selected={selectedSatelliteIds}
           location={hasLocation ? location : null}
-        />
+        >
+          {/* The pass list for the selection lives right where the user
+              picks satellites — the two always describe the same set. */}
+          <Suspense
+            fallback={
+              <div className="mt-3 h-24 animate-pulse rounded-xl border-t border-white/5 bg-white/[0.02]" />
+            }
+          >
+            <SatellitePassesPanel
+              location={location}
+              noradIds={noradIds}
+            />
+          </Suspense>
+        </SatellitePicker>
 
         <Suspense fallback={<BriefSkeleton />}>
-          <SkyBriefSection location={location} noradIds={noradIds} />
+          <SkyBriefSection location={location} noradIds={noradIds}>
+            {/* The live tracker sits right after the at-a-glance summary —
+                the visual payoff before the dense cards. */}
+            <div
+              id="radar"
+              className="scroll-mt-8"
+            >
+              <h2 className="mb-6 text-center text-2xl font-bold text-slate-100">
+                See what&apos;s overhead right now
+              </h2>
+              <SkyViewSection
+                location={location}
+                selectedIds={selectedSatelliteIds}
+                initialView={initialView}
+                initialFocus={initialFocus}
+              />
+            </div>
+          </SkyBriefSection>
         </Suspense>
-      </section>
-
-      {/* ── Live sky radar / 3D globe ────────────────────────── */}
-      <section id="radar" className="mx-auto max-w-5xl scroll-mt-8 px-4 pb-24">
-        <h2 className="mb-6 text-center text-2xl font-bold text-slate-100">
-          See what&apos;s overhead right now
-        </h2>        <SkyViewSection
-          location={location}
-          selectedIds={selectedSatelliteIds}
-          initialView={initialView}
-          initialFocus={initialFocus}
-        />
       </section>
 
       {/* ── Subscribe ────────────────────────────────────────── */}
@@ -155,6 +171,9 @@ export default async function HomePage({
         />
         <PushNotifications location={location} />
       </section>
+
+      {/* ── Sticky "Get alerts" bar — appears after the hero ── */}
+      <StickyAlertsBar />
 
       {/* ── Footer ───────────────────────────────────────────── */}
       <footer className="border-t border-white/5 py-10">
