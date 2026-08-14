@@ -14,6 +14,7 @@ import {
 } from "@/lib/utils";
 import { buildTonightBrief } from "@/services/sky/brief";
 import type { IssPass, LatLon, SkyBrief } from "@/types";
+import { NextPassBanner } from "./next-pass-banner";
 import { NightTimeline } from "./night-timeline";
 
 /**
@@ -202,6 +203,9 @@ export async function SkyBriefSection({
 
   return (
     <div className="space-y-4">
+      {/* Live countdown to the next pass — appears only when imminent. */}
+      <NextPassBanner passes={brief.issPasses} />
+
       {/* Tonight's verdict — the one-line answer before any detail. */}
       <div
         className={`flex items-center gap-4 rounded-2xl border p-4 ${VERDICT_TONE_STYLES[verdict.tone]}`}

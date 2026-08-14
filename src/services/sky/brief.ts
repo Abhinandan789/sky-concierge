@@ -10,6 +10,7 @@ import type {
   SkyBrief,
   SkyBriefError,
 } from "@/types";
+import { referenceMagnitude } from "@/config/satellites";
 import { computeTonightAurora } from "./aurora";
 import {
   getCachedCloudForecast,
@@ -83,6 +84,7 @@ export async function computeSatellitePasses(
       const passes = findSatellitePasses(tle.line1, tle.line2, location, {
         now,
         windowHours: options.windowHours,
+        referenceMagnitude: referenceMagnitude(id),
       });
       all.push(
         ...passes.map((pass) => ({
