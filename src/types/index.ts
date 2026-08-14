@@ -12,6 +12,8 @@ export interface IssPass {
   maxElevationDeg: number;
   /** Compass azimuth (0-360, true north) at the moment of max elevation. */
   maxAzimuthDeg: number;
+  /** Compass azimuth where the pass first clears the horizon. */
+  riseAzimuthDeg?: number;
   durationMinutes: number;
   /** Satellite name from the TLE, e.g. "ISS (ZARYA)". Set by the brief builder. */
   satelliteName?: string;

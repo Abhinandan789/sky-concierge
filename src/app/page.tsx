@@ -3,6 +3,7 @@ import { MoonStar, Satellite } from "lucide-react";
 import { Suspense } from "react";
 import { LocateButton } from "@/components/locate-button";
 import { PushNotifications } from "@/components/push-notifications";
+import { RedNightToggle } from "@/components/red-night-toggle";
 import { SatellitePicker } from "@/components/satellite-picker";
 import { LocationInput } from "@/components/location-input";
 import { SkyViewSection } from "@/components/sky-view-section";
@@ -174,6 +175,9 @@ export default async function HomePage({
 
       {/* ── Sticky "Get alerts" bar — appears after the hero ── */}
       <StickyAlertsBar />
+
+      {/* ── Red-light night mode toggle (keeps dark adaptation) ── */}
+      <RedNightToggle />
 
       {/* ── Footer ───────────────────────────────────────────── */}
       <footer className="border-t border-white/5 py-10">

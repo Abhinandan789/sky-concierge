@@ -1,11 +1,11 @@
-import {
-  CloudSun,
+import { CloudSun,
   MoonStar,
   Orbit,
   Sparkles,
   TriangleAlert,
   Zap,
 } from "lucide-react";
+import { satelliteLabel } from "@/config/satellites";
 import {
   formatCoordinates,
   formatDuration,
@@ -13,8 +13,107 @@ import {
   timeZoneFor,
 } from "@/lib/utils";
 import { buildTonightBrief } from "@/services/sky/brief";
-import type { LatLon } from "@/types";
+import type { IssPass, LatLon, SkyBrief } from "@/types";
 import { NightTimeline } from "./night-timeline";
+
+/**
+ * Synthesize the whole brief into one "is tonight worth it?" verdict — the
+ * single answer a stargazer actually wants, assembled from data the brief
+ * already computes. Score starts at 7 and moves for clouds, moon wash-out
+ * and the best upcoming pass; the sentence names the headline reasons.
+ */
+function buildVerdict(
+  brief: SkyBrief,
+  tz: string,
+): { score: number; headline: string; sentence: string; tone: "emerald" | "amber" | "rose" } {
+  let score = 7;
+  const parts: string[] = [];
+
+  const clouds = brief.clouds;
+  if (clouds.level === "CLEAR") {
+    parts.push("clear skies");
+  } else if (clouds.level === "PARTLY_CLOUDY") {
+    parts.push("partly cloudy");
+    score -= 1;
+  } else if (clouds.level === "CLOUDY") {
+    parts.push("cloud cover expected");
+    score -= 4;
+  } else {
+    parts.push("sky cover unknown");
+    score -= 1;
+  }
+
+  const moon = brief.moon;
+  if (moon.moonDownAllNight) {
+    parts.push("moonless all night");
+  } else if (moon.bestViewingWindow) {
+    parts.push(`moon down by ${formatTime(moon.bestViewingWindow.start, tz)}`);
+    if (moon.illumination > 0.6) {
+      score -= 1;
+    }
+  } else {
+    parts.push("moon up most of the night");
+    score -= 2;
+  }
+
+  let bestPass: IssPass | null = null;
+  for (const pass of brief.issPasses) {
+    if (!bestPass || pass.maxElevationDeg > bestPass.maxElevationDeg) {
+      bestPass = pass;
+    }
+  }
+  if (bestPass) {
+    // Friendly pill name when the pass knows its NORAD id (e.g. "Tiangong"),
+    // else the TLE name stripped of its parenthetical ("CSS (TIANHE)" → "CSS").
+    const name = bestPass.noradId
+      ? satelliteLabel(bestPass.noradId)
+      : bestPass.satelliteName?.replace(/\s*\(.*\)/, "") ?? "a satellite";
+    parts.push(
+      `${name} at ${formatTime(bestPass.start, tz)} (${bestPass.maxElevationDeg}°)`,
+    );
+    if (bestPass.maxElevationDeg >= 60) {
+      score += 1;
+    } else if (bestPass.maxElevationDeg < 30) {
+      score -= 1;
+    }
+  } else {
+    parts.push("no good passes tonight");
+    score -= 1;
+  }
+
+  score = Math.max(1, Math.min(10, score));
+
+  const headline =
+    score >= 8
+      ? "A great night to look up"
+      : score >= 6
+        ? "A good night to look up"
+        : score >= 4
+          ? "A fair night — pick the brightest events"
+          : "A tough night — keep expectations low";
+
+  let sentence = parts.join(" · ");
+  if (clouds.level === "CLOUDY") {
+    sentence += " — gaps may open for the brightest events";
+  }
+
+  const tone =
+    score >= 7 ? "emerald" : score >= 5 ? "amber" : "rose";
+
+  return { score, headline, sentence, tone };
+}
+
+const VERDICT_TONE_STYLES = {
+  emerald: "border-emerald-400/25 bg-emerald-400/10",
+  amber: "border-amber-400/25 bg-amber-400/10",
+  rose: "border-rose-400/25 bg-rose-400/10",
+} as const;
+
+const VERDICT_SCORE_STYLES = {
+  emerald: "text-emerald-300",
+  amber: "text-amber-300",
+  rose: "text-rose-300",
+} as const;
 
 const CLOUD_BADGES: Record<string, { label: string; className: string }> = {
   CLEAR: {
@@ -99,8 +198,34 @@ export async function SkyBriefSection({
   // a stargazer in Tokyo sees Tokyo time for when to look up.
   const tz = timeZoneFor(location.lat, location.lon);
 
+  const verdict = buildVerdict(brief, tz);
+
   return (
     <div className="space-y-4">
+      {/* Tonight's verdict — the one-line answer before any detail. */}
+      <div
+        className={`flex items-center gap-4 rounded-2xl border p-4 ${VERDICT_TONE_STYLES[verdict.tone]}`}
+      >
+        <div className="flex shrink-0 flex-col items-center leading-none">
+          <span
+            className={`mono text-3xl font-bold ${VERDICT_SCORE_STYLES[verdict.tone]}`}
+          >
+            {verdict.score}
+          </span>
+          <span className="mt-1 text-[9px] tracking-wider text-slate-400 uppercase">
+            /10 night
+          </span>
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-100">
+            {verdict.headline}
+          </p>
+          <p className="mt-0.5 text-xs leading-relaxed text-slate-400">
+            {verdict.sentence}
+          </p>
+        </div>
+      </div>
+
       {/* The at-a-glance summary comes first — one strip that tells the
           whole night, then the live tracker, then the detailed cards. */}
       <NightTimeline

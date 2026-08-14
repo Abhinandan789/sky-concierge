@@ -51,6 +51,9 @@ function finalizePass(run: ElevationSample[], horizonDeg: number): IssPass {
     end,
     maxElevationDeg: Math.max(horizonDeg, round1(maxSample.elevationDeg)),
     maxAzimuthDeg: round1(((maxSample.azimuthDeg % 360) + 360) % 360),
+    // Azimuth where the pass first clears the horizon — the "look there"
+    // direction the observer needs before the satellite is even visible.
+    riseAzimuthDeg: round1(((run[0].azimuthDeg % 360) + 360) % 360),
     durationMinutes: Math.round((end.getTime() - start.getTime()) / 60_000),
   };
 }

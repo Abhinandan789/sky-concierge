@@ -1,6 +1,6 @@
 import { Satellite } from "lucide-react";
 import { satelliteLabel } from "@/config/satellites";
-import { formatDuration, formatTime, timeZoneFor } from "@/lib/utils";
+import { formatCompass, formatDuration, formatTime, timeZoneFor } from "@/lib/utils";
 import { computeSatellitePasses, resolveNoradIds } from "@/services/sky/brief";
 import type { IssPass, LatLon } from "@/types";
 
@@ -97,9 +97,16 @@ export async function SatellitePassesPanel({
                     <span className="mono text-[10px] text-slate-400">
                       {formatTime(pass.end, tz)}
                     </span>
-                    <span className="mono ml-auto shrink-0 text-[10px] text-slate-500">
-                      max {pass.maxElevationDeg}° ·{" "}
-                      {formatDuration(pass.durationMinutes)}
+                    <span className="ml-auto shrink-0 text-[10px] text-slate-500">
+                      rises{" "}
+                      <span className="font-medium text-cyan-300/80">
+                        {formatCompass(pass.riseAzimuthDeg ?? pass.maxAzimuthDeg)}
+                      </span>
+                      <span className="text-slate-600"> · </span>
+                      <span className="mono">
+                        max {pass.maxElevationDeg}° ·{" "}
+                        {formatDuration(pass.durationMinutes)}
+                      </span>
                     </span>
                   </li>
                 ))}
