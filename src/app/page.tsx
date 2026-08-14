@@ -120,26 +120,34 @@ export default async function HomePage({
           </div>
         </div>
 
-        <SatellitePicker
-          selected={selectedSatelliteIds}
-          location={hasLocation ? location : null}
-        >
-          {/* The pass list for the selection lives right where the user
-              picks satellites — the two always describe the same set. */}
-          <Suspense
-            fallback={
-              <div className="mt-3 h-24 animate-pulse rounded-xl border-t border-white/5 bg-white/[0.02]" />
+        <Suspense fallback={<BriefSkeleton />}>
+          {/* The TRACK picker (with its pass list) renders inside the brief
+              section, AFTER the verdict — the answer comes before the tools.
+              The picker still drives the URL, so the brief recomputes for
+              the selection no matter where it sits. */}
+          <SkyBriefSection
+            location={location}
+            noradIds={noradIds}
+            picker={
+              <SatellitePicker
+                selected={selectedSatelliteIds}
+                location={hasLocation ? location : null}
+              >
+                {/* The pass list for the selection lives right where the user
+                    picks satellites — the two always describe the same set. */}
+                <Suspense
+                  fallback={
+                    <div className="mt-3 h-24 animate-pulse rounded-xl border-t border-white/5 bg-white/[0.02]" />
+                  }
+                >
+                  <SatellitePassesPanel
+                    location={location}
+                    noradIds={noradIds}
+                  />
+                </Suspense>
+              </SatellitePicker>
             }
           >
-            <SatellitePassesPanel
-              location={location}
-              noradIds={noradIds}
-            />
-          </Suspense>
-        </SatellitePicker>
-
-        <Suspense fallback={<BriefSkeleton />}>
-          <SkyBriefSection location={location} noradIds={noradIds}>
             {/* The live tracker sits right after the at-a-glance summary —
                 the visual payoff before the dense cards. */}
             <div

@@ -4,7 +4,8 @@ import { formatCompass, formatDuration, formatTime, timeZoneFor } from "@/lib/ut
 import { computeSatellitePasses, resolveNoradIds } from "@/services/sky/brief";
 import type { IssPass, LatLon } from "@/types";
 
-/** How many upcoming passes to show per satellite. */
+/** How many upcoming passes to compute per satellite (the first is always
+ * visible; the rest sit behind the "more passes" disclosure). */
 const PASSES_PER_SATELLITE = 2;
 
 /** How easy a pass is to spot, from its peak magnitude. */
@@ -39,6 +40,49 @@ function easeInfo(magnitude: number): {
     className: "border-rose-400/30 bg-rose-400/10 text-rose-300",
     hint: "hard — dark skies and binoculars needed",
   };
+}
+
+/** A single pass row: times, rise direction, elevation/duration, and the
+ * ease-of-spotting badge (or an "in shadow" tag when it's not visible). */
+function renderPassRow(pass: IssPass, index: number, tz: string) {
+  return (
+    <li key={index} className="flex items-baseline gap-2">
+      <span className="mono text-xs font-semibold text-cyan-200">
+        {formatTime(pass.start, tz)}
+      </span>
+      <span className="text-[10px] text-slate-600">→</span>
+      <span className="mono text-[10px] text-slate-400">
+        {formatTime(pass.end, tz)}
+      </span>
+      <span className="ml-auto shrink-0 text-[10px] text-slate-500">
+        rises{" "}
+        <span className="font-medium text-cyan-300/80">
+          {formatCompass(pass.riseAzimuthDeg ?? pass.maxAzimuthDeg)}
+        </span>
+        <span className="text-slate-600"> · </span>
+        <span className="mono">
+          max {pass.maxElevationDeg}° · {formatDuration(pass.durationMinutes)}
+        </span>
+        {pass.shadowed ? (
+          <span
+            className="ml-1.5 rounded border border-slate-500/30 bg-slate-500/10 px-1 text-[9px] text-slate-400"
+            title="The satellite is in Earth's shadow at its peak — it won't be visible even though it's above the horizon."
+          >
+            in shadow
+          </span>
+        ) : (
+          pass.magnitude !== undefined && (
+            <span
+              className={`mono ml-1.5 rounded border px-1 text-[9px] ${easeInfo(pass.magnitude).className}`}
+              title={`magnitude ${pass.magnitude} — ${easeInfo(pass.magnitude).hint}`}
+            >
+              mag {pass.magnitude}
+            </span>
+          )
+        )}
+      </span>
+    </li>
+  );
 }
 
 /**
@@ -133,45 +177,25 @@ export async function SatellitePassesPanel({
               </p>
             ) : (
               <ul className="space-y-1.5">
-                {group.passes.map((pass, index) => (
-                  <li key={index} className="flex items-baseline gap-2">
-                    <span className="mono text-xs font-semibold text-cyan-200">
-                      {formatTime(pass.start, tz)}
-                    </span>
-                    <span className="text-[10px] text-slate-600">→</span>
-                    <span className="mono text-[10px] text-slate-400">
-                      {formatTime(pass.end, tz)}
-                    </span>
-                    <span className="ml-auto shrink-0 text-[10px] text-slate-500">
-                      rises{" "}
-                      <span className="font-medium text-cyan-300/80">
-                        {formatCompass(pass.riseAzimuthDeg ?? pass.maxAzimuthDeg)}
+                {/* The first pass is always visible — the panel stays slim.
+                    Extra passes sit behind a native disclosure toggle. */}
+                {renderPassRow(group.passes[0], 0, tz)}
+                {group.passes.length > 1 && (
+                  <details className="group">
+                    <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[10px] text-slate-500 transition hover:text-cyan-300 [&::-webkit-details-marker]:hidden">
+                      <span className="inline-flex size-3.5 items-center justify-center rounded border border-white/10 bg-white/5 text-[8px] transition group-open:rotate-90">
+                        ▸
                       </span>
-                      <span className="text-slate-600"> · </span>
-                      <span className="mono">
-                        max {pass.maxElevationDeg}° ·{" "}
-                        {formatDuration(pass.durationMinutes)}
-                      </span>
-                      {pass.shadowed ? (
-                        <span
-                          className="ml-1.5 rounded border border-slate-500/30 bg-slate-500/10 px-1 text-[9px] text-slate-400"
-                          title="The satellite is in Earth's shadow at its peak — it won't be visible even though it's above the horizon."
-                        >
-                          in shadow
-                        </span>
-                      ) : (
-                        pass.magnitude !== undefined && (
-                          <span
-                            className={`mono ml-1.5 rounded border px-1 text-[9px] ${easeInfo(pass.magnitude).className}`}
-                            title={`magnitude ${pass.magnitude} — ${easeInfo(pass.magnitude).hint}`}
-                          >
-                            mag {pass.magnitude}
-                          </span>
-                        )
+                      {group.passes.length - 1} more pass
+                      {group.passes.length - 1 > 1 ? "es" : ""}
+                    </summary>
+                    <div className="mt-1.5 space-y-1.5">
+                      {group.passes.slice(1).map((pass, index) =>
+                        renderPassRow(pass, index + 1, tz),
                       )}
-                    </span>
-                  </li>
-                ))}
+                    </div>
+                  </details>
+                )}
               </ul>
             )}
           </li>

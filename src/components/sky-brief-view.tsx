@@ -186,12 +186,16 @@ export async function SkyBriefSection({
   location,
   noradIds,
   children,
+  picker,
 }: {
   location: LatLon;
   /** NORAD ids to track; defaults to the server-configured set. */
   noradIds?: string[];
   /** Slot rendered right after the at-a-glance summary (the live tracker). */
   children?: React.ReactNode;
+  /** The satellite TRACK picker — rendered after the verdict, so the answer
+   * comes before the tools. */
+  picker?: React.ReactNode;
 }) {
   const brief = await buildTonightBrief(location, { noradIds });
   const moon = brief.moon;
@@ -229,6 +233,10 @@ export async function SkyBriefSection({
           </p>
         </div>
       </div>
+
+      {/* The TRACK picker follows the verdict — configuring satellites is a
+          tool, not the first thing a visitor should meet. */}
+      {picker}
 
       {/* The at-a-glance summary comes first — one strip that tells the
           whole night, then the live tracker, then the detailed cards. */}
