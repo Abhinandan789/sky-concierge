@@ -9,7 +9,6 @@ import { LocationInput } from "@/components/location-input";
 import { SkyViewSection } from "@/components/sky-view-section";
 import { SkyBriefSection } from "@/components/sky-brief-view";
 import { SatellitePassesPanel } from "@/components/satellite-passes-panel";
-import { StickyAlertsBar } from "@/components/sticky-alerts-bar";
 import { SubscribeSection } from "@/components/subscribe-form";
 import { parseSatelliteIds } from "@/config/satellites";
 import { APP_DESCRIPTION, DATA_SOURCES, DEFAULT_LOCATION } from "@/config/site";
@@ -172,9 +171,6 @@ export default async function HomePage({
         />
         <PushNotifications location={location} />
       </section>
-
-      {/* ── Sticky "Get alerts" bar — appears after the hero ── */}
-      <StickyAlertsBar />
 
       {/* ── Red-light night mode toggle (keeps dark adaptation) ── */}
       <RedNightToggle />
