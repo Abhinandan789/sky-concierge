@@ -201,6 +201,12 @@ function TrackingPanel({
           </dd>
         </div>
       </dl>
+      {inViewCount === 0 && (
+        <p className="mt-1.5 text-[10px] leading-snug text-slate-500">
+          All tracked objects are below your horizon right now — the next pass
+          comes into view within the next orbit (~90 min).
+        </p>
+      )}
     </div>
   );
 }
@@ -520,6 +526,10 @@ export function SatelliteGlobeHud({
   const [listOpen, setListOpen] = useState(false);
   const toggleList = () => setListOpen((open) => !open);
 
+  // Tracking + legend also collapse behind a "View details" toggle on mobile,
+  // so the globe isn't pushed down by a wall of readouts.
+  const [detailsOpen, setDetailsOpen] = useState(false);
+
   const trackingPanel = (
     <TrackingPanel
       utcTime={utcTime}
@@ -566,9 +576,29 @@ export function SatelliteGlobeHud({
             onToggleList={toggleList}
           />
         </div>
-        <div className="grid grid-cols-2 items-stretch gap-2.5">
-          {trackingPanel}
-          {legendPanel}
+        {/* Tracking + legend collapse behind a toggle on mobile */}
+        <div className={`${PANEL} p-2.5`}>
+          <button
+            type="button"
+            onClick={() => setDetailsOpen((open) => !open)}
+            aria-expanded={detailsOpen}
+            className="flex w-full items-center gap-1.5"
+          >
+            <h4 className={`${HEADER} mb-0 text-slate-300`}>View details</h4>
+            <span className="ml-auto text-slate-500">
+              {detailsOpen ? (
+                <ChevronUp className="size-3" />
+              ) : (
+                <ChevronDown className="size-3" />
+              )}
+            </span>
+          </button>
+          {detailsOpen && (
+            <div className="mt-2 grid grid-cols-2 items-stretch gap-2.5">
+              {trackingPanel}
+              {legendPanel}
+            </div>
+          )}
         </div>
         <div className="flex flex-col items-center gap-2">
           {passBanner}

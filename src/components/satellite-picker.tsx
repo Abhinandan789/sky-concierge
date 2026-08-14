@@ -17,6 +17,8 @@ interface SatellitePickerProps {
   selected: string[];
   /** Explicit location from the URL, so navigation preserves it. */
   location: LatLon | null;
+  /** The pass list for the selection, rendered inside the panel (server). */
+  children?: React.ReactNode;
 }
 
 const NORAD_ID_PATTERN = /^\d{1,8}$/;
@@ -26,7 +28,11 @@ const NORAD_ID_PATTERN = /^\d{1,8}$/;
  * stored in the URL (?sat=25544,48274) so the server component re-renders the
  * brief with the requested NORAD ids.
  */
-export function SatellitePicker({ selected, location }: SatellitePickerProps) {
+export function SatellitePicker({
+  selected,
+  location,
+  children,
+}: SatellitePickerProps) {
   const router = useRouter();
   const [customId, setCustomId] = useState("");
 
@@ -168,6 +174,7 @@ export function SatellitePicker({ selected, location }: SatellitePickerProps) {
         {MAX_TRACKED_SATELLITES} at once. Alert emails use the same selection
         when you subscribe below.
       </p>
+      {children}
     </div>
   );
 }

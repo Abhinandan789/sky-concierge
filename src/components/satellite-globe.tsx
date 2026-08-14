@@ -80,15 +80,22 @@ const COMET_SEGMENTS = 4;
 /** Head-to-tail length of the pulse, in degrees of arc along the track. */
 const COMET_LENGTH_DEG = 18;
 /** How far ahead of the dot the head sweeps before looping back. */
-const COMET_SWEEP_DEG = 24;
+const COMET_SWEEP_DEG = 30;
 /** Forward speed of the pulse along the track, degrees/second. Kept calm —
- * at 0.8°/s the full sweep takes ~30 s, reading as a slow traveling light. */
+ * at 0.8°/s the full sweep takes ~37 s, reading as a slow traveling light. */
 const COMET_SPEED_DEG_S = 0.8;
 /** Leading-edge segment opacity; each segment behind it steps down. */
 const COMET_HEAD_OPACITY = 1;
 const COMET_TAIL_OPACITY = 0.3;
 /** Arc (degrees) over which the pulse fades in after respawning. */
-const COMET_SPAWN_FADE_DEG = 5;
+const COMET_SPAWN_FADE_DEG = 4;
+/** Arc (degrees) over which the pulse fades OUT as it nears the sweep limit.
+ * Without this, the loop visibly snaps the bright stretch back to the dot,
+ * which reads as the satellite moving backward along the dim (past) path.
+ * Fading it out at the far end makes the light dissolve into the distance
+ * and a fresh wave emerge from the dot — forward motion only. The windows
+ * are short so the pulse spends most of its sweep at full brightness. */
+const COMET_FADE_OUT_DEG = 5;
 /** How far above the track the pulse is drawn (km), so it never z-fights
  * the line it's riding. */
 const PULSE_LIFT_KM = 2;
@@ -125,11 +132,13 @@ function formatOffsetLabel(ms: number): string {
  * arc, so the sweep stays short and calm). */
 const MOON_COMET_SEGMENTS = 4;
 const MOON_COMET_LENGTH_DEG = 4;
-const MOON_COMET_SWEEP_DEG = 4.5;
+const MOON_COMET_SWEEP_DEG = 5.5;
 const MOON_COMET_SPEED_DEG_S = 0.35;
 const MOON_COMET_HEAD_OPACITY = 0.95;
 const MOON_COMET_TAIL_OPACITY = 0.3;
-const MOON_COMET_SPAWN_FADE_DEG = 2.5;
+const MOON_COMET_SPAWN_FADE_DEG = 1.5;
+/** Same fade-out treatment as the satellite pulse — no snap-back to the ring. */
+const MOON_COMET_FADE_OUT_DEG = 1;
 
 /**
  * Walk a polyline from `start` and record the position at each target arc
@@ -1036,11 +1045,20 @@ function createGlobeView(
             (pulseRadius + PULSE_LIFT_KM / EARTH_RADIUS_KM) / pulseRadius,
           );
         }
-        // Fade in right after looping so the respawn isn't a hard pop.
-        const spawnFade = Math.min(
+        // Envelope: fade in right after respawning AND fade out as the head
+        // nears the sweep limit, so the light dissolves into the distance and
+        // a fresh wave emerges from the dot — the loop never visibly snaps
+        // back, which is what made the pulse read as backward travel along
+        // the dim (past) path.
+        const fadeIn = Math.min(
           1,
           headArc / (COMET_SPAWN_FADE_DEG * radPerDeg),
         );
+        const fadeOut = Math.min(
+          1,
+          (sweepArc - headArc) / (COMET_FADE_OUT_DEG * radPerDeg),
+        );
+        const envelope = Math.min(fadeIn, fadeOut);
         // Sub-segments step down from the bright leading edge to the tail;
         // positions hold tail → head, so segment j connects the two sampled
         // points just behind the head.
@@ -1058,7 +1076,7 @@ function createGlobeView(
           arr[5] = b.z;
           segment.geometry.attributes.position.needsUpdate = true;
           (segment.line.material as THREE.LineBasicMaterial).opacity =
-            segment.opacity * spawnFade;
+            segment.opacity * envelope;
         }
       } else {
         // No future vertices left in the track window — nothing to sweep.
@@ -1199,10 +1217,15 @@ function createGlobeView(
           (pulseRadius + PULSE_LIFT_KM / EARTH_RADIUS_KM) / pulseRadius,
         );
       }
-      const spawnFade = Math.min(
+      const fadeIn = Math.min(
         1,
         headArc / (MOON_COMET_SPAWN_FADE_DEG * radPerDeg),
       );
+      const fadeOut = Math.min(
+        1,
+        (sweepArc - headArc) / (MOON_COMET_FADE_OUT_DEG * radPerDeg),
+      );
+      const envelope = Math.min(fadeIn, fadeOut);
       for (let j = 0; j < MOON_COMET_SEGMENTS; j += 1) {
         const segment = moonCometSegments[j];
         const a = moonPulsePositions[MOON_COMET_SEGMENTS - 1 - j];
@@ -1217,7 +1240,7 @@ function createGlobeView(
         arr[5] = b.z;
         segment.geometry.attributes.position.needsUpdate = true;
         (segment.line.material as THREE.LineBasicMaterial).opacity =
-          segment.opacity * spawnFade;
+          segment.opacity * envelope;
       }
     } else if (moonCometSegments.length > 0) {
       for (const segment of moonCometSegments) {
@@ -1526,7 +1549,7 @@ export function SatelliteGlobe({
     const time = scrubClock.toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
-      hour12: false,
+      hour12: true,
     });
     return simulating ? `${time} · ${formatOffsetLabel(simOffsetMs)}` : time;
   })();

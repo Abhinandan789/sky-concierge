@@ -76,6 +76,16 @@ body {
   color: transparent;
 }
 
+/* Red-light night mode — preserves dark adaptation, the classic astronomy-
+   app pattern (Stellarium / SkySafari style). sepia + hue-rotate maps the
+   whole cool palette to shades of red while keeping luminance contrast, so
+   the sky stays dark and the text stays readable without a bright flash.
+   Applied to <html> (not body) so position:fixed descendants keep their
+   viewport anchoring. */
+html.red-night {
+  filter: sepia(1) hue-rotate(-50deg) saturate(3) brightness(0.9);
+}
+
 @keyframes aurora-pulse {
   0%,
   100% {
