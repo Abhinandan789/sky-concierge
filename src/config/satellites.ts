@@ -19,6 +19,26 @@ export const KNOWN_SATELLITES: SatelliteDef[] = [
 /** Most satellites the tracker will compute at once — keeps the brief fast. */
 export const MAX_TRACKED_SATELLITES = 4;
 
+/**
+ * Apparent magnitude each satellite would have at 1000 km range with a phase
+ * angle of 0° (sun behind the observer). Approximate but stable — used to
+ * say "how easy is this pass to spot", not as a photometric prediction.
+ * Smaller = brighter; ISS at a good pass reaches roughly −3.
+ */
+const SAT_REFERENCE_MAGNITUDES: Record<string, number> = {
+  "25544": -1.8, // ISS (ZARYA)
+  "48274": -1.2, // Tiangong / CSS
+  "20580": 3.5, // Hubble — small telescope, faint
+  "33591": 4.0, // NOAA 19 — small polar orbiter
+  "25994": 3.5, // Terra
+  "27424": 3.5, // Aqua
+};
+
+/** Reference magnitude for a NORAD id (falls back to a generic satellite). */
+export function referenceMagnitude(noradId: string): number {
+  return SAT_REFERENCE_MAGNITUDES[noradId] ?? 3.0;
+}
+
 const NORAD_ID_PATTERN = /^\d{1,8}$/;
 
 export type SatelliteIdsResult =

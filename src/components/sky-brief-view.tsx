@@ -1,12 +1,11 @@
-import {
-  CloudSun,
+import { CloudSun,
   MoonStar,
   Orbit,
-  Satellite,
   Sparkles,
   TriangleAlert,
   Zap,
 } from "lucide-react";
+import { satelliteLabel } from "@/config/satellites";
 import {
   formatCoordinates,
   formatDuration,
@@ -14,8 +13,108 @@ import {
   timeZoneFor,
 } from "@/lib/utils";
 import { buildTonightBrief } from "@/services/sky/brief";
-import type { LatLon } from "@/types";
+import type { IssPass, LatLon, SkyBrief } from "@/types";
+import { NextPassBanner } from "./next-pass-banner";
 import { NightTimeline } from "./night-timeline";
+
+/**
+ * Synthesize the whole brief into one "is tonight worth it?" verdict — the
+ * single answer a stargazer actually wants, assembled from data the brief
+ * already computes. Score starts at 7 and moves for clouds, moon wash-out
+ * and the best upcoming pass; the sentence names the headline reasons.
+ */
+function buildVerdict(
+  brief: SkyBrief,
+  tz: string,
+): { score: number; headline: string; sentence: string; tone: "emerald" | "amber" | "rose" } {
+  let score = 7;
+  const parts: string[] = [];
+
+  const clouds = brief.clouds;
+  if (clouds.level === "CLEAR") {
+    parts.push("clear skies");
+  } else if (clouds.level === "PARTLY_CLOUDY") {
+    parts.push("partly cloudy");
+    score -= 1;
+  } else if (clouds.level === "CLOUDY") {
+    parts.push("cloud cover expected");
+    score -= 4;
+  } else {
+    parts.push("sky cover unknown");
+    score -= 1;
+  }
+
+  const moon = brief.moon;
+  if (moon.moonDownAllNight) {
+    parts.push("moonless all night");
+  } else if (moon.bestViewingWindow) {
+    parts.push(`moon down by ${formatTime(moon.bestViewingWindow.start, tz)}`);
+    if (moon.illumination > 0.6) {
+      score -= 1;
+    }
+  } else {
+    parts.push("moon up most of the night");
+    score -= 2;
+  }
+
+  let bestPass: IssPass | null = null;
+  for (const pass of brief.issPasses) {
+    if (!bestPass || pass.maxElevationDeg > bestPass.maxElevationDeg) {
+      bestPass = pass;
+    }
+  }
+  if (bestPass) {
+    // Friendly pill name when the pass knows its NORAD id (e.g. "Tiangong"),
+    // else the TLE name stripped of its parenthetical ("CSS (TIANHE)" → "CSS").
+    const name = bestPass.noradId
+      ? satelliteLabel(bestPass.noradId)
+      : bestPass.satelliteName?.replace(/\s*\(.*\)/, "") ?? "a satellite";
+    parts.push(
+      `${name} at ${formatTime(bestPass.start, tz)} (${bestPass.maxElevationDeg}°)`,
+    );
+    if (bestPass.maxElevationDeg >= 60) {
+      score += 1;
+    } else if (bestPass.maxElevationDeg < 30) {
+      score -= 1;
+    }
+  } else {
+    parts.push("no good passes tonight");
+    score -= 1;
+  }
+
+  score = Math.max(1, Math.min(10, score));
+
+  const headline =
+    score >= 8
+      ? "A great night to look up"
+      : score >= 6
+        ? "A good night to look up"
+        : score >= 4
+          ? "A fair night — pick the brightest events"
+          : "A tough night — keep expectations low";
+
+  let sentence = parts.join(" · ");
+  if (clouds.level === "CLOUDY") {
+    sentence += " — gaps may open for the brightest events";
+  }
+
+  const tone =
+    score >= 7 ? "emerald" : score >= 5 ? "amber" : "rose";
+
+  return { score, headline, sentence, tone };
+}
+
+const VERDICT_TONE_STYLES = {
+  emerald: "border-emerald-400/25 bg-emerald-400/10",
+  amber: "border-amber-400/25 bg-amber-400/10",
+  rose: "border-rose-400/25 bg-rose-400/10",
+} as const;
+
+const VERDICT_SCORE_STYLES = {
+  emerald: "text-emerald-300",
+  amber: "text-amber-300",
+  rose: "text-rose-300",
+} as const;
 
 const CLOUD_BADGES: Record<string, { label: string; className: string }> = {
   CLEAR: {
@@ -86,114 +185,73 @@ function CardShell({
 export async function SkyBriefSection({
   location,
   noradIds,
+  children,
+  picker,
 }: {
   location: LatLon;
   /** NORAD ids to track; defaults to the server-configured set. */
   noradIds?: string[];
+  /** Slot rendered right after the at-a-glance summary (the live tracker). */
+  children?: React.ReactNode;
+  /** The satellite TRACK picker — rendered after the verdict, so the answer
+   * comes before the tools. */
+  picker?: React.ReactNode;
 }) {
   const brief = await buildTonightBrief(location, { noradIds });
-  const nextPasses = brief.issPasses.slice(0, 3);
   const moon = brief.moon;
   // All times are rendered in the *location's* timezone, not the server's —
   // a stargazer in Tokyo sees Tokyo time for when to look up.
   const tz = timeZoneFor(location.lat, location.lon);
 
+  const verdict = buildVerdict(brief, tz);
+
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {/* Satellite passes */}
-        <CardShell
-          icon={<Satellite className="size-4.5" />}
-          title="Satellite Passes"
-          accent="text-cyan-300"
-        >
-          {nextPasses.length === 0 ? (
-            <p className="text-sm leading-relaxed text-slate-400">
-              No passes above 10° in the next two nights from this spot.
-            </p>
-          ) : (
-            <ul className="space-y-3">
-              {nextPasses.map((pass, index) => (
-                <li
-                  key={index}
-                  className="border-b border-white/5 pb-3 last:border-0 last:pb-0"
-                >
-                  {pass.satelliteName && (
-                    <span className="mb-1 block text-[10px] tracking-wide text-slate-500 uppercase">
-                      {pass.satelliteName}
-                    </span>
-                  )}
-                  <div className="flex items-baseline gap-2">
-                    <span className="mono text-sm font-semibold text-cyan-200">
-                      {formatTime(pass.start, tz)}
-                    </span>
-                    <span className="text-xs text-slate-500">→</span>
-                    <span className="mono text-xs text-slate-400">
-                      {formatTime(pass.end, tz)}
-                    </span>
-                    <span className="mono ml-auto shrink-0 text-xs text-slate-500">
-                      max {pass.maxElevationDeg}° ·{" "}
-                      {formatDuration(pass.durationMinutes)}
-                    </span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-          <p className="mt-4 text-xs leading-relaxed text-slate-500">
-            Look up — the station moves fast and crosses the sky in a few
-            minutes. No telescope needed.
+      {/* Live countdown to the next pass — appears only when imminent. */}
+      <NextPassBanner passes={brief.issPasses} />
+
+      {/* Tonight's verdict — the one-line answer before any detail. */}
+      <div
+        className={`flex items-center gap-4 rounded-2xl border p-4 ${VERDICT_TONE_STYLES[verdict.tone]}`}
+      >
+        <div className="flex shrink-0 flex-col items-center leading-none">
+          <span
+            className={`mono text-3xl font-bold ${VERDICT_SCORE_STYLES[verdict.tone]}`}
+          >
+            {verdict.score}
+          </span>
+          <span className="mt-1 text-[9px] tracking-wider text-slate-400 uppercase">
+            /10 night
+          </span>
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-100">
+            {verdict.headline}
           </p>
-        </CardShell>
+          <p className="mt-0.5 text-xs leading-relaxed text-slate-400">
+            {verdict.sentence}
+          </p>
+        </div>
+      </div>
 
-        {/* Aurora */}
-        <CardShell
-          icon={<Zap className="size-4.5" />}
-          title="Aurora"
-          accent="text-amber-300"
-        >
-          {brief.aurora === null ? (
-            <p className="text-sm leading-relaxed text-slate-400">
-              No aurora forecast available for tonight.
-            </p>
-          ) : (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-slate-300">Peak Kp tonight</span>
-                <span
-                  className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${AURORA_BADGES[brief.aurora.level].className}`}
-                >
-                  {AURORA_BADGES[brief.aurora.level].label}
-                </span>
-              </div>
+      {/* The TRACK picker follows the verdict — configuring satellites is a
+          tool, not the first thing a visitor should meet. */}
+      {picker}
 
-              {/* Kp meter 0-9 */}
-              <div>
-                <div className="relative h-2 overflow-hidden rounded-full bg-white/10">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-amber-400 to-rose-500"
-                    style={{
-                      width: `${Math.min(100, (brief.aurora.maxKpTonight / 9) * 100)}%`,
-                    }}
-                  />
-                </div>
-                <div className="mono mt-1.5 flex justify-between text-[10px] text-slate-500">
-                  <span>0</span>
-                  <span className="text-amber-300/80">
-                    Kp {brief.aurora.maxKpTonight.toFixed(1)}
-                  </span>
-                  <span>9</span>
-                </div>
-              </div>
+      {/* The at-a-glance summary comes first — one strip that tells the
+          whole night, then the live tracker, then the detailed cards. */}
+      <NightTimeline
+        location={location}
+        now={brief.generatedAt}
+        moon={moon}
+        passes={brief.issPasses}
+        showers={brief.showers}
+        clouds={brief.clouds}
+      />
 
-              <p className="text-sm leading-relaxed text-slate-400">
-                {brief.aurora.viewingLatitudeHint}. Head to a dark spot with a
-                clear northern view after midnight.
-              </p>
-            </div>
-          )}
-        </CardShell>
+      {children}
 
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         {/* Meteor showers */}
         <CardShell
           icon={<MoonStar className="size-4.5" />}
@@ -290,6 +348,59 @@ export async function SkyBriefSection({
                   : brief.clouds.level === "CLOUDY"
                     ? "Thick cloud cover expected — passes and meteors may be hidden."
                     : "Partly cloudy — keep an eye on gaps for the brightest events."}
+              </p>
+            </div>
+          )}
+        </CardShell>
+
+        {/* Aurora — kept last: low-value on most nights, so it stops
+            crowding the first screen. */}
+        <CardShell
+          icon={<Zap className="size-4.5" />}
+          title="Aurora"
+          accent="text-amber-300"
+        >
+          {brief.aurora === null ? (
+            <p className="text-sm leading-relaxed text-slate-400">
+              No aurora forecast available for tonight.
+            </p>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-slate-300">Peak Kp tonight</span>
+                <span
+                  className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${AURORA_BADGES[brief.aurora.level].className}`}
+                >
+                  {AURORA_BADGES[brief.aurora.level].label}
+                </span>
+              </div>
+
+              {/* Kp meter 0-9 */}
+              <div>
+                <div className="relative h-2 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-cyan-400 via-amber-400 to-rose-500"
+                    style={{
+                      width: `${Math.min(100, (brief.aurora.maxKpTonight / 9) * 100)}%`,
+                    }}
+                  />
+                </div>
+                <div className="mono mt-1.5 flex justify-between text-[10px] text-slate-500">
+                  <span>0</span>
+                  <span className="text-amber-300/80">
+                    Kp {brief.aurora.maxKpTonight.toFixed(1)}
+                  </span>
+                  <span>9</span>
+                </div>
+              </div>
+
+              <p className="text-sm leading-relaxed text-slate-400">
+                {brief.aurora.viewingLatitudeHint}. Head to a dark spot with a
+                clear northern view after midnight.
+              </p>
+              <p className="text-[11px] leading-relaxed text-slate-500">
+                Kp measures geomagnetic activity; 4+ means aurora may be
+                visible at lower latitudes.
               </p>
             </div>
           )}
@@ -477,25 +588,14 @@ export async function SkyBriefSection({
         </div>
       </div>
 
-      {/* Night timeline */}
-      <NightTimeline
-        location={location}
-        now={brief.generatedAt}
-        moon={moon}
-        passes={brief.issPasses}
-        showers={brief.showers}
-        clouds={brief.clouds}
-      />
-
       {/* Section footer */}
       <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
         <span className="mono">
           {formatCoordinates(location.lat, location.lon)} · updated{" "}
-          {brief.generatedAt.toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-            timeZone: tz,
-          })}
+          {formatTime(brief.generatedAt, tz)}
+          <span className="ml-1 text-slate-600">
+            · all times are local to this location
+          </span>
         </span>
         {brief.errors.length > 0 && (
           <span className="inline-flex items-center gap-1.5 text-amber-300/80">

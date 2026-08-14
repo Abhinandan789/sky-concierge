@@ -10,6 +10,7 @@ import type {
   SkyBrief,
   SkyBriefError,
 } from "@/types";
+import { referenceMagnitude } from "@/config/satellites";
 import { computeTonightAurora } from "./aurora";
 import {
   getCachedCloudForecast,
@@ -58,6 +59,52 @@ function errorMessage(error: unknown) {
 }
 
 /**
+ * Compute the upcoming passes for the selected satellites (used both by the
+ * full brief and by the passes panel that lives in the TRACK picker, so the
+ * selection and its pass list never disagree). Each satellite is fetched
+ * independently so one bad NORAD id (or a transient CelesTrak miss) degrades
+ * that satellite only.
+ */
+export async function computeSatellitePasses(
+  location: LatLon,
+  options: {
+    noradIds?: string[];
+    fetcher?: typeof fetch;
+    now?: Date;
+    windowHours?: number;
+  } = {},
+): Promise<{ passes: IssPass[]; errors: SkyBriefError[] }> {
+  const fetcher = options.fetcher ?? fetch;
+  const now = options.now ?? new Date();
+  const all: IssPass[] = [];
+  const errors: SkyBriefError[] = [];
+  for (const id of resolveNoradIds(options.noradIds)) {
+    try {
+      const tle = await getCachedTleSet(id, fetcher);
+      const passes = findSatellitePasses(tle.line1, tle.line2, location, {
+        now,
+        windowHours: options.windowHours,
+        referenceMagnitude: referenceMagnitude(id),
+      });
+      all.push(
+        ...passes.map((pass) => ({
+          ...pass,
+          satelliteName: tle.name,
+          noradId: id,
+        })),
+      );
+    } catch (error) {
+      errors.push({
+        section: "iss",
+        message: `NORAD ${id}: ${errorMessage(error)}`,
+      });
+    }
+  }
+  all.sort((a, b) => a.start.getTime() - b.start.getTime());
+  return { passes: all, errors };
+}
+
+/**
  * Build "tonight's sky" for a location. Each data source is isolated so a
  * single upstream failure degrades gracefully instead of failing the brief.
  */
@@ -74,38 +121,19 @@ export async function buildTonightBrief(
   let aurora: AuroraInfo | null = null;
   let clouds: CloudSummary = { level: "UNKNOWN", average: null, hours: [] };
   const [passResult, auroraRows, cloudResult] = await Promise.allSettled([
-    (async () => {
-      const ids = resolveNoradIds(options.noradIds);
-      const all: IssPass[] = [];
-      for (const id of ids) {
-        // Each satellite is fetched independently so one bad NORAD id (or a
-        // transient CelesTrak miss) degrades that satellite only — the rest
-        // of the selection still gets its passes.
-        try {
-          const tle = await getCachedTleSet(id, fetcher);
-          const passes = findSatellitePasses(tle.line1, tle.line2, location, {
-            now,
-            windowHours: options.windowHours,
-          });
-          all.push(
-            ...passes.map((pass) => ({ ...pass, satelliteName: tle.name })),
-          );
-        } catch (error) {
-          errors.push({
-            section: "iss",
-            message: `NORAD ${id}: ${errorMessage(error)}`,
-          });
-        }
-      }
-      all.sort((a, b) => a.start.getTime() - b.start.getTime());
-      return all;
-    })(),
+    computeSatellitePasses(location, {
+      noradIds: options.noradIds,
+      fetcher,
+      now,
+      windowHours: options.windowHours,
+    }),
     getCachedKpForecast(fetcher),
     getCachedCloudForecast(location.lat, location.lon, fetcher),
   ]);
 
   if (passResult.status === "fulfilled") {
-    issPasses = passResult.value;
+    issPasses = passResult.value.passes;
+    errors.push(...passResult.value.errors);
   } else {
     errors.push({ section: "iss", message: errorMessage(passResult.reason) });
   }

@@ -12,9 +12,17 @@ export interface IssPass {
   maxElevationDeg: number;
   /** Compass azimuth (0-360, true north) at the moment of max elevation. */
   maxAzimuthDeg: number;
+  /** Compass azimuth where the pass first clears the horizon. */
+  riseAzimuthDeg?: number;
   durationMinutes: number;
+  /** Peak apparent magnitude — how easy the pass is to spot (smaller = brighter). */
+  magnitude?: number;
+  /** True when the satellite is in Earth's shadow at its peak — invisible. */
+  shadowed?: boolean;
   /** Satellite name from the TLE, e.g. "ISS (ZARYA)". Set by the brief builder. */
   satelliteName?: string;
+  /** NORAD catalog id this pass belongs to. Set by the brief builder. */
+  noradId?: string;
 }
 
 export type AuroraLevel = "LOW" | "MODERATE" | "HIGH" | "STORM";

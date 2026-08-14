@@ -24,11 +24,12 @@ export function timeZoneFor(lat: number, lon: number): string {
   }
 }
 
-/** Format a Date as HH:MM in the given timezone (server-local when omitted). */
+/** Format a Date as HH:MM AM/PM in the given timezone (server-local when omitted). */
 export function formatTime(date: Date, timeZone?: string) {
   return date.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
+    hour12: true,
     ...(timeZone ? { timeZone } : {}),
   });
 }

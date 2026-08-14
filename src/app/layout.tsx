@@ -23,6 +23,13 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="antialiased">
+        {/* Restore red-light mode before first paint so dark adaptation
+            isn't broken by a flash of the normal palette on reload. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `try{if(localStorage.getItem("sky-concierge:red-night")==="1"){document.documentElement.classList.add("red-night")}}catch(e){}`,
+          }}
+        />
         <Starfield />
         <RememberedLocation />
         <div className="relative z-10">{children}</div>
