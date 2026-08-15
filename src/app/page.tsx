@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { MoonStar, Satellite } from "lucide-react";
 import { Suspense } from "react";
+import { HowToReadModal } from "@/components/how-to-read-modal";
 import { LocateButton } from "@/components/locate-button";
 import { PushNotifications } from "@/components/push-notifications";
 import { RedNightToggle } from "@/components/red-night-toggle";
@@ -108,7 +109,7 @@ export default async function HomePage({
         id="tonight"
         className="mx-auto max-w-5xl scroll-mt-8 px-4 pb-24"
       >
-        <div className="mb-6 flex items-end justify-between gap-4">
+        <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
           <div>
             <h2 className="text-2xl font-bold text-slate-100">
               Tonight&apos;s Brief
@@ -118,6 +119,9 @@ export default async function HomePage({
               weather data.
             </p>
           </div>
+          {/* Small tag, not clutter — full explanations live behind a modal
+              so first-time stargazers get plain language on demand. */}
+          <HowToReadModal />
         </div>
 
         <Suspense fallback={<BriefSkeleton />}>

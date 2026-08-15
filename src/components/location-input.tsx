@@ -59,7 +59,7 @@ export function LocationInput({
           type="button"
           onClick={() => setOpen((value) => !value)}
           aria-expanded={open}
-          className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2.5 py-1 text-xs font-medium text-slate-300 transition hover:border-white/30 hover:bg-white/10"
+          className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2.5 py-2 text-xs font-medium text-slate-300 transition hover:border-white/30 hover:bg-white/10 sm:py-1"
         >
           {open ? (
             <>
