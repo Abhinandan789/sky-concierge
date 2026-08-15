@@ -26,6 +26,27 @@ describe("renderEmailShell", () => {
     expect(html).toContain("a&lt;b&gt;&amp;c");
     expect(html).not.toContain("<b>");
   });
+
+  it("paints a dense starfield that matches the site's canvas look", () => {
+    const html = renderEmailShell({ preheader: "x", children: "" });
+    // ~75 stars = 75 radial-gradient layers on the sky table, not the old 26.
+    const starLayers = html.match(/radial-gradient\(circle at/g) ?? [];
+    expect(starLayers.length).toBeGreaterThanOrEqual(60);
+    // Ice-blue site palette present.
+    expect(html).toContain("rgba(226,232,255");
+    // Meteor streaks like the site's occasional shooting stars.
+    expect(html).toContain("ellipse 120px 1.5px");
+  });
+
+  it("adds twinkle as progressive enhancement while the static field stays inline", () => {
+    const html = renderEmailShell({ preheader: "x", children: "" });
+    // Gmail-safe baseline: full starfield in an inline style (no animation needed).
+    expect(html).toContain("background-image:");
+    // Enhancement: keyframes + class for clients that run CSS animations.
+    expect(html).toContain("@keyframes skyConciergeTwinkle");
+    expect(html).toContain("@keyframes skyConciergeBreath");
+    expect(html).toContain("class=\"sky-concierge-sky\"");
+  });
 });
 
 describe("renderConfirmationEmail", () => {
