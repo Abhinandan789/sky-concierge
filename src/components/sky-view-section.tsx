@@ -85,7 +85,7 @@ export function SkyViewSection({
               onClick={() => setViewAndUrl(id)}
               aria-pressed={view === id}
               className={cn(
-                "inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-xs font-semibold transition",
+                "inline-flex items-center gap-1.5 rounded-full px-4 py-2.5 text-xs font-semibold transition sm:py-1.5",
                 view === id
                   ? "bg-cyan-400/15 text-cyan-200"
                   : "text-slate-400 hover:text-slate-200",

@@ -244,7 +244,7 @@ export function SubscribeSection({
                   type="button"
                   onClick={() => toggleSatellite(satellite.noradId)}
                   aria-pressed={active}
-                  className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                  className={`rounded-full border px-3 py-2 text-xs font-medium transition sm:py-1 ${
                     active
                       ? "border-cyan-400/50 bg-cyan-400/10 text-cyan-200"
                       : "border-white/10 bg-white/[0.03] text-slate-400 hover:border-white/25"
@@ -257,7 +257,7 @@ export function SubscribeSection({
             {customIds.map((noradId) => (
               <span
                 key={noradId}
-                className="inline-flex items-center gap-1 rounded-full border border-indigo-400/40 bg-indigo-400/10 px-3 py-1 text-xs font-medium text-indigo-200"
+                className="inline-flex items-center gap-1 rounded-full border border-indigo-400/40 bg-indigo-400/10 px-3 py-2 text-xs font-medium text-indigo-200 sm:py-1"
               >
                 {satelliteLabel(noradId)}
                 <button
@@ -283,12 +283,12 @@ export function SubscribeSection({
                 }}
                 placeholder="NORAD id…"
                 aria-label="Add satellite by NORAD catalog id"
-                className="w-28 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200 placeholder:text-slate-500 focus:border-cyan-400/60 focus:outline-none"
+                className="w-28 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-200 placeholder:text-slate-500 focus:border-cyan-400/60 focus:outline-none sm:py-1"
               />
               <button
                 type="button"
                 onClick={addSatellite}
-                className="inline-flex items-center gap-1 rounded-full border border-cyan-400/40 bg-cyan-400/10 px-2.5 py-1 text-xs font-medium text-cyan-200 transition hover:border-cyan-300/70 hover:bg-cyan-400/20"
+                className="inline-flex items-center gap-1 rounded-full border border-cyan-400/40 bg-cyan-400/10 px-2.5 py-2 text-xs font-medium text-cyan-200 transition hover:border-cyan-300/70 hover:bg-cyan-400/20 sm:py-1"
               >
                 <Plus className="size-3" />
                 Add
