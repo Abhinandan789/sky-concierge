@@ -145,26 +145,33 @@ export function NightTimeline({
         {/* Dark night base */}
         <div className="absolute inset-0 bg-gradient-to-r from-indigo-950/90 via-slate-900 to-indigo-950/90" />
         {/* Moon-up periods */}
-        {moonUpSegments.map((segment, index) => (
-          <div
-            key={index}
-            className="absolute inset-y-0 bg-indigo-400/25"
-            style={{
-              left: `${segment.left}%`,
-              width: `${Math.max(segment.width, 0.4)}%`,
-            }}
-          />
-        ))}
+        {moonUpSegments.map((segment, index) => {
+          // Clamp so a segment hugging dawn never pokes past the right edge.
+          const width = Math.max(segment.width, 0.4);
+          return (
+            <div
+              key={index}
+              className="absolute inset-y-0 bg-indigo-400/25"
+              style={{
+                left: `${Math.min(segment.left, 100 - width)}%`,
+                width: `${width}%`,
+              }}
+            />
+          );
+        })}
         {/* Hourly cloud-cover haze (denser = more opaque) */}
         {clouds.hours.map((hour, index) => {
           const hourMs = 3600_000;
           const width = Math.max((hourMs / nightMs) * 100, 0.3);
+          // An hourly strip that starts near dawn would otherwise extend past
+          // the bar and get clipped — clamp it to stay inside.
+          const left = Math.min(pct(hour.time), 100 - width);
           return (
             <div
               key={index}
               className="absolute inset-y-0 bg-slate-100"
               style={{
-                left: `${pct(hour.time)}%`,
+                left: `${left}%`,
                 width: `${width}%`,
                 opacity: (hour.cloudCover / 100) * 0.45,
               }}

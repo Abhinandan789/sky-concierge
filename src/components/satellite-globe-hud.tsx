@@ -246,6 +246,13 @@ function LegendPanel({ onCenterOnYou }: { onCenterOnYou?: () => void }) {
           </span>
         </li>
         <li className="flex items-center gap-2 px-1">
+          <span className="inline-block size-2 shrink-0 rounded-full border border-dashed border-slate-500/80" />
+          <span className="text-[11px] text-slate-200">In shadow</span>
+          <span className="ml-auto text-[9px] text-slate-500">
+            above horizon, dark — not visible
+          </span>
+        </li>
+        <li className="flex items-center gap-2 px-1">
           <span className="inline-block size-2.5 shrink-0 rounded-full border-2 border-[#f1f5f9]" />
           <span className="text-[11px] text-slate-200">Moon</span>
           <span className="ml-auto text-[9px] text-slate-500">

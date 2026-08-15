@@ -46,7 +46,7 @@ function easeInfo(magnitude: number): {
  * ease-of-spotting badge (or an "in shadow" tag when it's not visible). */
 function renderPassRow(pass: IssPass, index: number, tz: string) {
   return (
-    <li key={index} className="flex items-baseline gap-2">
+    <li key={index} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
       <span className="mono text-xs font-semibold text-cyan-200">
         {formatTime(pass.start, tz)}
       </span>
@@ -54,7 +54,7 @@ function renderPassRow(pass: IssPass, index: number, tz: string) {
       <span className="mono text-[10px] text-slate-400">
         {formatTime(pass.end, tz)}
       </span>
-      <span className="ml-auto shrink-0 text-[10px] text-slate-500">
+      <span className="ml-auto min-w-0 text-[10px] text-slate-500">
         rises{" "}
         <span className="font-medium text-cyan-300/80">
           {formatCompass(pass.riseAzimuthDeg ?? pass.maxAzimuthDeg)}
