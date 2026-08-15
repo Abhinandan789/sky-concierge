@@ -767,8 +767,10 @@ export function SatelliteMap({
             — past 30 min (dim) and the next 90 min (bright), with a light
             sweeping forward to show the direction of travel. The lime arc
             marks where a satellite will actually be visible from here
-            (above the horizon and dark enough). Positions update live; the
-            dashed ring is the horizon for a ~400 km orbit.
+            (above the horizon and dark enough). A satellite can clear the
+            horizon yet sit in Earth&apos;s shadow — those passes are tagged
+            &ldquo;in shadow&rdquo; and never get the arc. Positions update
+            live; the dashed ring is the horizon for a ~400 km orbit.
           </p>
           <ul className="space-y-1.5">
             {tles.map((tle, index) => (
