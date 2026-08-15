@@ -231,6 +231,7 @@ export function candidatesFromBrief(
             eyebrow: "Aurora alert",
             title: `Aurora watch tonight`,
             intro: `The forecast predicts active aurora conditions in the next 12 hours.`,
+            accent: "#a78bfa", // violet — the aurora's own color
             facts: [
               {
                 label: "Intensity",
@@ -264,6 +265,7 @@ export function candidatesFromBrief(
           body: `${peakSoon.name} peaks on ${peakSoon.peakDate} with up to ${peakSoon.zhr} meteors/hour.\nBest viewing after midnight, away from city lights.`,
           html: renderAlertEmail({
             eyebrow: "Meteor shower",
+            accent: "#e879f9", // fuchsia — shooting-star streak
             title:
               peakSoon.daysUntilPeak === 0
                 ? `${peakSoon.name} — peak tonight`
