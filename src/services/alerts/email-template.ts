@@ -85,38 +85,100 @@ const C = {
 };
 
 /**
- * A field of stars: layered 1–2px radial-gradient dots scattered across the
- * canvas (white, ice-blue, and faint violet). Pure CSS — no images to block,
- * no data URIs. Rendered on top of the base wash below.
+ * A field of stars built to match the site's animated canvas starfield
+ * (src/components/starfield.tsx): ice-blue rgba(226,232,255) dots of varied
+ * size and brightness, plus a couple of faint meteor streaks. Generated
+ * deterministically (seeded PRNG) so the rendered HTML is stable across
+ * builds and test runs. Pure CSS — no images to block, no data URIs.
+ *
+ * Gmail-safe baseline: a static multi-layer background-image (inline style)
+ * that renders everywhere. Twinkle is added as a <style>-block progressive
+ * enhancement — Gmail and Outlook ignore animations entirely and show the
+ * static field, while Apple Mail / iOS Mail snap a subset of stars
+ * bright/dim and breathe the base wash, echoing the canvas's sine-wave
+ * alpha pulse.
  */
-const STARS = [
-  "radial-gradient(circle at 8% 12%, rgba(255,255,255,0.95) 0 1.5px, transparent 2.5px)",
-  "radial-gradient(circle at 22% 6%, rgba(255,255,255,0.7) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 34% 18%, rgba(190,227,255,0.9) 0 1.5px, transparent 2.5px)",
-  "radial-gradient(circle at 48% 9%, rgba(255,255,255,0.55) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 63% 15%, rgba(255,255,255,0.85) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 78% 7%, rgba(190,227,255,0.75) 0 1.5px, transparent 2.5px)",
-  "radial-gradient(circle at 91% 16%, rgba(255,255,255,0.6) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 12% 30%, rgba(255,255,255,0.5) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 27% 38%, rgba(255,255,255,0.8) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 45% 26%, rgba(196,181,253,0.8) 0 1.5px, transparent 2.5px)",
-  "radial-gradient(circle at 60% 33%, rgba(255,255,255,0.45) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 74% 27%, rgba(255,255,255,0.7) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 88% 37%, rgba(255,255,255,0.55) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 16% 52%, rgba(255,255,255,0.65) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 38% 46%, rgba(255,255,255,0.4) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 55% 55%, rgba(255,255,255,0.6) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 70% 48%, rgba(255,255,255,0.5) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 85% 58%, rgba(190,227,255,0.7) 0 1.5px, transparent 2.5px)",
-  "radial-gradient(circle at 6% 74%, rgba(255,255,255,0.55) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 24% 66%, rgba(255,255,255,0.35) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 42% 78%, rgba(255,255,255,0.6) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 58% 70%, rgba(196,181,253,0.6) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 76% 82%, rgba(255,255,255,0.45) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 90% 72%, rgba(255,255,255,0.65) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 33% 90%, rgba(255,255,255,0.4) 0 1px, transparent 2px)",
-  "radial-gradient(circle at 68% 94%, rgba(255,255,255,0.5) 0 1px, transparent 2px)",
-].join(", ");
+
+interface StarSpec {
+  x: number;
+  y: number;
+  size: number;
+  alpha: number;
+  tint: "white" | "ice" | "violet";
+}
+
+/** Deterministic PRNG so the starfield is identical on every render. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const STAR_TINTS = [
+  [226, 232, 255], // ice-white — the site's primary star color
+  [226, 232, 255],
+  [226, 232, 255],
+  [190, 227, 255], // ice-blue
+  [196, 181, 253], // faint violet
+] as const;
+
+/** ~75 stars scattered across the canvas, denser toward the top like the site. */
+function buildStars(): StarSpec[] {
+  const rand = mulberry32(0x5ca15e);
+  const stars: StarSpec[] = [];
+  for (let i = 0; i < 75; i += 1) {
+    // Denser above the horizon line (~65% of the height) like a real night sky.
+    const y = rand() * 0.62 + 0.02;
+    const x = rand() * 0.94 + 0.03;
+    const hero = rand() > 0.88; // a few standout stars, like the site's bright ones
+    const size = hero ? 1.6 + rand() * 0.7 : 0.5 + rand() * 1.0;
+    const alpha = hero ? 0.85 + rand() * 0.15 : 0.3 + rand() * 0.55;
+    const tintRoll = rand();
+    const tint: StarSpec["tint"] =
+      tintRoll > 0.8 ? "ice" : tintRoll > 0.92 ? "violet" : "white";
+    stars.push({ x, y, size, alpha, tint });
+  }
+  return stars;
+}
+
+const STARS = buildStars();
+
+/** One radial-gradient layer per star; larger stars get a soft glow halo. */
+function starLayer(star: StarSpec, alphaScale = 1): string {
+  const [r, g, b] = STAR_TINTS[star.tint === "white" ? 0 : star.tint === "ice" ? 3 : 4];
+  const alpha = Math.max(0.05, star.alpha * alphaScale);
+  const { x, y, size } = star;
+  if (size >= 1.6) {
+    return (
+      `radial-gradient(circle at ${x.toFixed(1)}% ${y.toFixed(1)}%, ` +
+      `rgba(${r},${g},${b},${alpha.toFixed(2)}) 0 ${(size * 0.55).toFixed(2)}px, ` +
+      `rgba(${r},${g},${b},${(alpha * 0.32).toFixed(2)}) ${(size * 0.9).toFixed(2)}px, ` +
+      `transparent ${(size * 1.6).toFixed(2)}px)`
+    );
+  }
+  return (
+    `radial-gradient(circle at ${x.toFixed(1)}% ${y.toFixed(1)}%, ` +
+    `rgba(${r},${g},${b},${alpha.toFixed(2)}) 0 ${size.toFixed(2)}px, ` +
+    `transparent ${(size + 0.9).toFixed(2)}px)`
+  );
+}
+
+/** The ~14 stars that twinkle (the brighter half of the field). */
+const TWINKLE_INDICES = STARS.map((s, i) => ({ s, i }))
+  .filter(({ s }) => s.size >= 0.95)
+  .slice(0, 14)
+  .map(({ i }) => i);
+
+const METEORS = [
+  // Two faint streaks like the site's occasional shooting stars.
+  "radial-gradient(ellipse 120px 1.5px at 22% 15%, rgba(255,255,255,0.7), rgba(255,255,255,0) 68%)",
+  "radial-gradient(ellipse 70px 1px at 74% 6%, rgba(255,255,255,0.45), rgba(255,255,255,0) 68%)",
+];
 
 /**
  * The base sky: soft cyan + violet aurora glows near the top, over a deep
@@ -127,6 +189,41 @@ const SKY_GLOWS =
   "radial-gradient(ellipse 90% 50% at 85% -5%, rgba(129,140,248,0.14), transparent 55%), " +
   "linear-gradient(180deg, #0c1226 0%, #070a16 48%, #0a0d1c 100%)";
 
+/** The static (Gmail-safe) starfield: stars + meteors + aurora glows. */
+const STARS_STATIC = [
+  ...STARS.map((s) => starLayer(s)),
+  ...METEORS,
+  SKY_GLOWS,
+].join(", ");
+
+/** The dimmed variant used by the twinkle animation's "off" phase. */
+const STARS_TWINKLE_DIM = [
+  ...STARS.map((s, i) =>
+    TWINKLE_INDICES.includes(i) ? starLayer(s, 0.35) : starLayer(s),
+  ),
+  ...METEORS,
+  SKY_GLOWS,
+].join(", ");
+
+/**
+ * Twinkle + breathing, inside a <style> block. Gmail and Outlook ignore
+ * animations entirely (the inline STARS_STATIC stays put); Apple Mail and
+ * iOS Mail run it: a subset of stars snap dim/bright and the wash breathes.
+ */
+const TWINKLE_CSS = `
+  @keyframes skyConciergeTwinkle {
+    0%, 60%, 100% { background-image: ${STARS_STATIC}; }
+    30% { background-image: ${STARS_TWINKLE_DIM}; }
+  }
+  @keyframes skyConciergeBreath {
+    0%, 100% { background-color: #070a16; }
+    50% { background-color: #0c1124; }
+  }
+  .sky-concierge-sky {
+    animation: skyConciergeTwinkle 5.5s ease-in-out infinite,
+               skyConciergeBreath 11s ease-in-out infinite;
+  }
+`;
 const DEFAULT_FOOTER =
   "You are receiving this because you subscribed to Sky Concierge.<br>Every alert email includes a one-click unsubscribe link.";
 
@@ -151,10 +248,11 @@ export function renderEmailShell(options: {
 <meta name="color-scheme" content="dark">
 <meta name="supported-color-schemes" content="dark">
 <title>Sky Concierge</title>
+<style>${TWINKLE_CSS}</style>
 </head>
 <body style="margin:0;padding:0;background-color:${C.page};">
 <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">${esc(preheader)}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="${C.page}" style="background-color:${C.page};background-image:${STARS}, ${SKY_GLOWS};">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="${C.page}" class="sky-concierge-sky" style="background-color:${C.page};background-image:${STARS_STATIC};">
   <tr>
     <td align="center" style="padding:40px 16px 32px;">
       <!-- Brand wordmark -->
