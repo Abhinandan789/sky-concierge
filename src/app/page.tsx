@@ -3,6 +3,7 @@ import { MoonStar, Satellite } from "lucide-react";
 import { Suspense } from "react";
 import { HowToReadModal } from "@/components/how-to-read-modal";
 import { LocateButton } from "@/components/locate-button";
+import { ShareTonightButton } from "@/components/share-tonight-button";
 import { PushNotifications } from "@/components/push-notifications";
 import { RedNightToggle } from "@/components/red-night-toggle";
 import { SatellitePicker } from "@/components/satellite-picker";
@@ -12,13 +13,60 @@ import { SkyBriefSection } from "@/components/sky-brief-view";
 import { SatellitePassesPanel } from "@/components/satellite-passes-panel";
 import { SubscribeSection } from "@/components/subscribe-form";
 import { parseSatelliteIds } from "@/config/satellites";
-import { APP_DESCRIPTION, DATA_SOURCES, DEFAULT_LOCATION } from "@/config/site";
+import {
+  APP_DESCRIPTION,
+  DATA_SOURCES,
+  DEFAULT_LOCATION,
+  siteUrl,
+} from "@/config/site";
 import { parseNumber, validateLatLon } from "@/lib/utils";
 
-export const metadata: Metadata = {
-  title: "Tonight's Sky",
-  description: APP_DESCRIPTION,
-};
+/**
+ * Personalized Open Graph image: when the shared URL carries ?lat=&lon=&sat=,
+ * the preview shows that exact location's verdict card (the same renderer as
+ * /api/share-card). Next's file-based opengraph-image covers the plain URL;
+ * this makes shared location links preview the right night too.
+ */
+export async function generateMetadata({
+  searchParams,
+}: {
+  searchParams: Promise<{
+    lat?: string;
+    lon?: string;
+    sat?: string;
+  }>;
+}): Promise<Metadata> {
+  const params = await searchParams;
+  const requestedLat = parseNumber(params.lat);
+  const requestedLon = parseNumber(params.lon);
+  const hasLocation =
+    requestedLat !== null &&
+    requestedLon !== null &&
+    validateLatLon(requestedLat, requestedLon) === null;
+  if (!hasLocation) {
+    return { title: "Tonight's Sky", description: APP_DESCRIPTION };
+  }
+
+  const image = `${siteUrl()}/api/share-card?lat=${encodeURIComponent(
+    params.lat!,
+  )}&lon=${encodeURIComponent(params.lon!)}${params.sat ? `&sat=${encodeURIComponent(params.sat)}` : ""}`;
+
+  return {
+    title: "Tonight's Sky",
+    description: APP_DESCRIPTION,
+    openGraph: {
+      images: [
+        {
+          url: image,
+          width: 1200,
+          height: 630,
+          alt: "Tonight's sky verdict for your location",
+        },
+      ],
+    },
+    twitter: { images: [image] },
+  };
+}
 
 function BriefSkeleton() {
   return (
@@ -119,9 +167,12 @@ export default async function HomePage({
               weather data.
             </p>
           </div>
-          {/* Small tag, not clutter — full explanations live behind a modal
-              so first-time stargazers get plain language on demand. */}
-          <HowToReadModal />
+          {/* Two small tags, not clutter — the share card reuses the brief's
+              own verdict, and full explanations live behind a modal. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <ShareTonightButton />
+            <HowToReadModal />
+          </div>
         </div>
 
         <Suspense fallback={<BriefSkeleton />}>
