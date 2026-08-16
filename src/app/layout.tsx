@@ -12,6 +12,11 @@ export const metadata: Metadata = {
     template: `%s — ${APP_NAME}`,
   },
   description: APP_DESCRIPTION,
+  // Google Search Console ownership proof — renders as
+  // <meta name="google-site-verification" content="..."> in <head>.
+  verification: {
+    google: "AEeCrpqI0OmMFTZQuOPX1PDxT0dN4IYB5T_gUA0svvo",
+  },
   alternates: {
     canonical: "/",
   },
