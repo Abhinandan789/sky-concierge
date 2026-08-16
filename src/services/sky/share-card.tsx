@@ -1,7 +1,6 @@
 import { ImageResponse } from "next/og";
-import { satelliteLabel } from "@/config/satellites";
-import { DEFAULT_LOCATION } from "@/config/site";
-import { parseSatelliteIds } from "@/config/satellites";
+import { parseSatelliteIds, satelliteLabel } from "@/config/satellites";
+import { DEFAULT_LOCATION, siteUrl } from "@/config/site";
 import {
   formatCoordinates,
   formatTime,
@@ -24,6 +23,8 @@ export interface ShareCardParams {
   lat?: string | null;
   lon?: string | null;
   sat?: string | null;
+  /** "landscape" (1200×630, OG/Twitter standard) or "square" (1080×1080). */
+  shape?: "landscape" | "square";
 }
 
 export interface ShareCardPass {
@@ -31,13 +32,19 @@ export interface ShareCardPass {
   time: string;
   maxElevationDeg: number;
   riseDirection: string;
-  magnitude: number | undefined;
+  /** Plain-language brightness — share cards get seen by people who've never
+   * used the tool, so "very bright" beats "mag -2.3". */
+  brightness: string;
 }
 
 export interface ShareCardData {
   locationLabel: string;
   dateLabel: string;
   timeZoneLabel: string;
+  /** Readable site address (no protocol) — the loop back to the tool. */
+  siteHost: string;
+  /** "Perseids peak tonight ✨" when a shower is at its peak, else null. */
+  peakShower: string | null;
   verdict: ReturnType<typeof buildVerdict>;
   bestPass: ShareCardPass | null;
   moonLine: string;
@@ -146,10 +153,15 @@ export async function loadShareCard(
         visiblePasses[0])
       : null;
 
+  // A shower peaking tonight is the most shareable event of all — surface it.
+  const peakShower = brief.showers.find((shower) => shower.isPeakTonight);
+
   return {
     locationLabel: formatCoordinates(location.lat, location.lon),
     dateLabel: dateLabel(brief.generatedAt, tz),
     timeZoneLabel: tz,
+    siteHost: siteUrl().replace(/^https?:\/\//, "").replace(/\/$/, ""),
+    peakShower: peakShower ? `${peakShower.name} peaks tonight ✨` : null,
     verdict,
     bestPass: best
       ? {
@@ -161,7 +173,7 @@ export async function loadShareCard(
           riseDirection: formatCompassDeg(
             best.riseAzimuthDeg ?? best.maxAzimuthDeg,
           ),
-          magnitude: best.magnitude,
+          brightness: brightnessLabel(best.magnitude),
         }
       : null,
     moonLine: moon.moonDownAllNight
@@ -170,6 +182,23 @@ export async function loadShareCard(
         ? `Moon: ${moon.phaseName}, ${Math.round(moon.illumination * 100)}% lit · dark from ${formatTime(moon.bestViewingWindow.start, tz)}`
         : `Moon: ${moon.phaseName}, ${Math.round(moon.illumination * 100)}% lit · up most of the night`,
   };
+}
+
+/** "mag -2.3" → "very bright" — share cards must read for a first-timer. */
+function brightnessLabel(magnitude: number | undefined): string {
+  if (magnitude === undefined) {
+    return "bright";
+  }
+  if (magnitude <= -1) {
+    return "very bright";
+  }
+  if (magnitude <= 1) {
+    return "bright";
+  }
+  if (magnitude <= 3) {
+    return "faint";
+  }
+  return "hard to spot";
 }
 
 const COMPASS_POINTS = [
@@ -182,22 +211,34 @@ function formatCompassDeg(azimuthDeg: number): string {
   return COMPASS_POINTS[index];
 }
 
-/** The presentational card — pure JSX, no side effects, easy to snapshot. */
-export function ShareCardImage({ data }: { data: ShareCardData }) {
+/** The presentational card — pure JSX, no side effects, easy to snapshot.
+ * Renders at any size; the layout is a flex column with justify-between, so
+ * a square crop just breathes more in the middle (the verdict stays central).
+ */
+export function ShareCardImage({
+  data,
+  width = 1200,
+  height = 630,
+}: {
+  data: ShareCardData;
+  width?: number;
+  height?: number;
+}) {
   const { verdict } = data;
   const accent = TONE_COLORS[verdict.tone];
+  const square = height > 700;
 
   return (
     <div
       style={{
-        width: 1200,
-        height: 630,
+        width,
+        height,
         display: "flex",
         flexDirection: "column",
         justifyContent: "space-between",
         position: "relative",
         overflow: "hidden",
-        padding: "52px 64px",
+        padding: square ? "64px 84px" : "52px 64px",
         background:
           "linear-gradient(178deg, #05060f 0%, #0a0f26 52%, #060818 100%)",
         color: "#e2e8f0",
@@ -466,7 +507,7 @@ export function ShareCardImage({ data }: { data: ShareCardData }) {
                   color: "#94a3b8",
                 }}
               >
-                {`${data.bestPass.time} · max ${data.bestPass.maxElevationDeg}° · rises ${data.bestPass.riseDirection}${data.bestPass.magnitude !== undefined ? ` · mag ${data.bestPass.magnitude}` : ""}`}
+                {`${data.bestPass.time} · max ${data.bestPass.maxElevationDeg}° · rises ${data.bestPass.riseDirection} · ${data.bestPass.brightness}`}
               </div>
             </div>
           ) : (
@@ -503,6 +544,29 @@ export function ShareCardImage({ data }: { data: ShareCardData }) {
             </div>
           )}
 
+          {data.peakShower && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                padding: "12px 20px",
+                borderRadius: 14,
+                border: "1px solid rgba(232,121,249,0.35)",
+                backgroundColor: "rgba(232,121,249,0.08)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  fontSize: 16,
+                  color: "#f0abfc",
+                }}
+              >
+                {data.peakShower}
+              </div>
+            </div>
+          )}
+
           <div
             style={{
               display: "flex",
@@ -524,34 +588,53 @@ export function ShareCardImage({ data }: { data: ShareCardData }) {
           </div>
         </div>
 
+        {/* CTA + the readable URL — the loop back to the tool. */}
         <div
           style={{
             display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            borderTop: "1px solid rgba(148,163,184,0.16)",
-            paddingTop: 16,
+            flexDirection: "column",
+            gap: 10,
+            position: "relative",
           }}
         >
           <div
             style={{
               display: "flex",
-              fontSize: 14,
-              color: "#64748b",
+              alignItems: "center",
+              justifyContent: "space-between",
+              borderTop: "1px solid rgba(148,163,184,0.16)",
+              paddingTop: 16,
             }}
           >
-            {`All times are local to this location · ${data.timeZoneLabel}`}
+            <div
+              style={{
+                display: "flex",
+                fontSize: 15,
+                fontWeight: 600,
+                color: "#94a3b8",
+              }}
+            >
+              Never miss a light in the sky again.
+            </div>
+            <div
+              style={{
+                display: "flex",
+                fontSize: 16,
+                fontWeight: 700,
+                color: "#e2e8f0",
+              }}
+            >
+              {data.siteHost}
+            </div>
           </div>
           <div
             style={{
-              fontSize: 14,
-              fontWeight: 600,
-              letterSpacing: 1.5,
-              textTransform: "uppercase",
+              display: "flex",
+              fontSize: 12,
               color: "#475569",
             }}
           >
-            Sky Concierge
+            {`All times are local to this location · ${data.timeZoneLabel}`}
           </div>
         </div>
       </div>
@@ -564,8 +647,11 @@ export async function renderShareCard(
   params: ShareCardParams,
 ): Promise<ImageResponse> {
   const data = await loadShareCard(params);
-  return new ImageResponse(<ShareCardImage data={data} />, {
-    width: 1200,
-    height: 630,
-  });
+  const square = params.shape === "square";
+  const width = square ? 1080 : 1200;
+  const height = square ? 1080 : 630;
+  return new ImageResponse(
+    <ShareCardImage data={data} width={width} height={height} />,
+    { width, height },
+  );
 }

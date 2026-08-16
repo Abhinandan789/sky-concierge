@@ -11,10 +11,13 @@ export const runtime = "nodejs";
  */
 export async function GET(request: NextRequest) {
   const searchParams = new URL(request.url).searchParams;
+  const shape =
+    searchParams.get("shape") === "square" ? ("square" as const) : undefined;
   const response = await renderShareCard({
     lat: searchParams.get("lat"),
     lon: searchParams.get("lon"),
     sat: searchParams.get("sat"),
+    shape,
   });
   // "Tonight" data — safe to cache for an hour at the edge, revalidated in
   // the background after that (the underlying TLE/cloud fetches are TTL-cached

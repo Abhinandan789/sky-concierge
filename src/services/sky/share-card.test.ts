@@ -37,11 +37,15 @@ describe("loadShareCard", () => {
     expect(data.locationLabel).toContain("W");
     expect(data.timeZoneLabel).toBe("America/New_York");
     expect(data.dateLabel).toMatch(/^\w+, \w+ \d+/);
+    expect(data.siteHost).toMatch(/^[a-z0-9.-]+(:\d+)?$/);
     expect(data.verdict.score).toBeGreaterThanOrEqual(1);
     expect(data.verdict.score).toBeLessThanOrEqual(10);
     expect(data.verdict.headline.length).toBeGreaterThan(0);
     expect(data.verdict.sentence.length).toBeGreaterThan(0);
     expect(data.moonLine).toContain("Moon:");
+    expect(data.peakShower === null || data.peakShower.includes("tonight")).toBe(
+      true,
+    );
   });
 
   it("picks the highest visible ISS pass (skipping shadowed ones)", async () => {
@@ -55,6 +59,7 @@ describe("loadShareCard", () => {
       expect(data.bestPass.maxElevationDeg).toBeGreaterThanOrEqual(10);
       expect(data.bestPass.time).toMatch(/\d{1,2}:\d{2}/);
       expect(data.bestPass.riseDirection.length).toBeGreaterThanOrEqual(2);
+      expect(data.bestPass.brightness.length).toBeGreaterThan(0);
     } else {
       // No pass above 10° in the window — the card still has a verdict.
       expect(data.verdict.score).toBeGreaterThanOrEqual(1);
